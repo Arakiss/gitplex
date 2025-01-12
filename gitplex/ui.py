@@ -1,14 +1,16 @@
 """Terminal UI components and utilities."""
 
 from pathlib import Path
-from typing import Any, List
+from typing import Any
 
+import click
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.theme import Theme
-import click
+
+from .exceptions import SystemConfigError
 
 # Create a custom theme for consistent styling
 theme = Theme({
@@ -105,36 +107,46 @@ def print_backup_info(backup_path: Path) -> None:
     )
 
 
+def prompt_directory() -> str:
+    """Prompt for a directory path and ensure it exists."""
+    while True:
+        dir_path = get_user_input("Enter workspace directory")
+        try:
+            path = Path(dir_path).resolve()
+            path.mkdir(parents=True, exist_ok=True)
+            return str(path)
+        except Exception as e:
+            print_error("Invalid directory path", str(e))
+            if not confirm_action("Try again?"):
+                raise SystemConfigError("Directory setup failed") from e
+
+
 def prompt_name() -> str:
     """Prompt for profile name."""
-    return click.prompt("Enter profile name")
+    return get_user_input("Enter profile name")
 
 
 def prompt_email() -> str:
     """Prompt for Git email."""
-    return click.prompt("Enter Git email")
+    return get_user_input("Enter Git email")
 
 
 def prompt_username() -> str:
     """Prompt for Git username."""
-    return click.prompt("Enter Git username")
+    return get_user_input("Enter Git username")
 
 
-def prompt_directory() -> str:
-    """Prompt for workspace directory."""
-    directory = click.prompt("Enter workspace directory")
-    return str(Path(directory).resolve())
-
-
-def prompt_providers() -> List[str]:
+def prompt_providers(default: str = "github") -> list[str]:
     """Prompt for Git providers."""
-    return [
-        click.prompt(
-            "Enter Git provider",
-            type=click.Choice(["github", "gitlab", "bitbucket"]),
-            default="github",
-        )
-    ]
+    providers = ["github", "gitlab", "bitbucket"]
+    provider = get_user_input(
+        f"Enter Git provider ({', '.join(providers)})",
+        default=default
+    )
+    if provider not in providers:
+        print_warning(f"Invalid provider '{provider}', using default: {default}")
+        provider = default
+    return [provider]
 
 
 def confirm_backup() -> bool:
