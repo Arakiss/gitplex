@@ -4,12 +4,8 @@ import configparser
 from pathlib import Path
 import subprocess
 
-class SystemConfigError(Exception):
-    """System configuration error."""
-    def __init__(self, message, details=None):
-        self.message = message
-        self.details = details
-        super().__init__(message)
+from .exceptions import SystemConfigError
+
 
 class GitConfig:
     """Git configuration manager."""
@@ -30,7 +26,7 @@ class GitConfig:
         try:
             self._update_config(name, email, username)
         except (OSError, configparser.Error) as e:
-            raise SystemConfigError(f"Failed to setup Git config: {e}")
+            raise SystemConfigError("Failed to setup Git config", str(e))
 
     def update(self, name: str, email: str, username: str) -> None:
         """Update Git configuration.
@@ -43,7 +39,7 @@ class GitConfig:
         try:
             self._update_config(name, email, username)
         except (OSError, configparser.Error) as e:
-            raise SystemConfigError(f"Failed to update Git config: {e}")
+            raise SystemConfigError("Failed to update Git config", str(e))
 
     def _update_config(self, name: str, email: str, username: str) -> None:
         """Update Git configuration file.
@@ -77,6 +73,7 @@ class GitConfig:
 
         # Set permissions
         self.config_path.chmod(0o644)
+
 
 def update_gitconfig(
     config_path: Path,
@@ -120,8 +117,8 @@ def update_gitconfig(
 
     except (OSError, configparser.Error) as e:
         raise SystemConfigError(
-            f"Failed to update Git config: {e}",
-            details=f"Path: {config_path}",
+            "Failed to update Git config",
+            details=f"Path: {config_path}, Error: {e}",
         )
 
 
@@ -164,11 +161,11 @@ def create_directory_gitconfig(
         )
     except subprocess.CalledProcessError as e:
         raise SystemConfigError(
-            f"Failed to update Git config: {e.stderr}",
+            "Failed to update Git config",
             details=f"Command: {' '.join(e.cmd)}\nOutput: {e.stdout}\nError: {e.stderr}",
         )
     except OSError as e:
         raise SystemConfigError(
-            f"Failed to create Git config file: {e}",
-            details=f"Path: {config_path}",
+            "Failed to create Git config file",
+            details=f"Path: {config_path}, Error: {e}",
         )

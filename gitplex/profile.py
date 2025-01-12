@@ -129,6 +129,7 @@ class ProfileManager:
         username: str,
         directories: list[str],
         providers: list[str],
+        ssh_key: str | None = None,
     ) -> Profile:
         """Set up a new Git profile.
 
@@ -138,6 +139,7 @@ class ProfileManager:
             username: Git username
             directories: List of workspace directories
             providers: List of Git providers
+            ssh_key: Optional path to SSH key
 
         Returns:
             Created profile
@@ -147,21 +149,36 @@ class ProfileManager:
             if name in self.profiles:
                 raise ProfileError(f"Profile '{name}' already exists")
 
+            # Convert and validate directories
+            try:
+                profile_dirs = []
+                for d in directories:
+                    path = Path(d).expanduser().resolve()
+                    profile_dirs.append(path)
+            except Exception as e:
+                raise ProfileError(f"Invalid directory path: {e}")
+
             profile = Profile(
                 name=name,
                 email=email,
                 username=username,
-                directories=[Path(d).expanduser() for d in directories],
+                directories=profile_dirs,
                 providers=[GitProvider(p) for p in providers],
             )
 
             # Create workspace directories
             for directory in profile.directories:
-                directory.mkdir(parents=True, exist_ok=True)
+                try:
+                    directory.mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    raise ProfileError(f"Failed to create directory {directory}: {e}")
 
             # Configure Git and SSH
-            self.git_config.setup(name, email, username)
-            self.ssh_config.setup(name, username, providers)
+            try:
+                self.git_config.setup(name, email, username)
+                self.ssh_config.setup(name, username, providers)
+            except Exception as e:
+                raise ProfileError(f"Failed to configure Git/SSH: {e}")
 
             # Save profile
             self.profiles[name] = profile
@@ -169,8 +186,10 @@ class ProfileManager:
 
             return profile
 
-        except (SystemConfigError, OSError) as e:
-            raise ProfileError(f"Failed to setup profile: {e}")
+        except Exception as e:
+            # Ensure the error message is properly formatted
+            error_msg = str(e).replace("[", "\\[").replace("]", "\\]")
+            raise ProfileError(f"Failed to setup profile: {error_msg}")
 
     def switch_profile(self, name: str) -> Profile:
         """Switch to a different Git profile.
@@ -188,19 +207,28 @@ class ProfileManager:
             profile = self.profiles[name]
 
             # Update configurations
-            self.git_config.update(name, profile.email, profile.username)
-            self.ssh_config.update(name, profile.username, [p.value for p in profile.providers])
+            try:
+                self.git_config.update(name, profile.email, profile.username)
+                self.ssh_config.update(name, profile.username, [p.value for p in profile.providers])
+            except Exception as e:
+                raise ProfileError(f"Failed to update Git/SSH configuration: {e}")
 
             # Update active profile
             for p in self.profiles.values():
                 p.active = False
             profile.active = True
-            self._save_profiles()
+
+            try:
+                self._save_profiles()
+            except Exception as e:
+                raise ProfileError(f"Failed to save profile changes: {e}")
 
             return profile
 
-        except (SystemConfigError, ProfileError) as e:
-            raise ProfileError(f"Failed to switch profile: {e}")
+        except Exception as e:
+            # Ensure the error message is properly formatted
+            error_msg = str(e).replace("[", "\\[").replace("]", "\\]")
+            raise ProfileError(f"Failed to switch profile: {error_msg}")
 
     def list_profiles(self) -> list[Profile]:
         """List all profiles.
