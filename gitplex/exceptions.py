@@ -1,12 +1,11 @@
 """Custom exceptions for GitPlex."""
 
-from typing import Optional
 
 
 class GitPlexError(Exception):
     """Base exception for all GitPlex errors."""
 
-    def __init__(self, message: str, details: Optional[str] = None) -> None:
+    def __init__(self, message: str, details: str | None = None) -> None:
         """Initialize the error.
         
         Args:
@@ -40,4 +39,4 @@ class BackupError(GitPlexError):
 
 class SystemConfigError(GitPlexError):
     """Errors related to system configuration."""
-    pass 
+    pass

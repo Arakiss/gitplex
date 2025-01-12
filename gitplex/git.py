@@ -1,80 +1,174 @@
 """Git configuration management functionality."""
 
 import configparser
-import os
 from pathlib import Path
-from typing import Optional
+import subprocess
 
+class SystemConfigError(Exception):
+    """System configuration error."""
+    def __init__(self, message, details=None):
+        self.message = message
+        self.details = details
+        super().__init__(message)
+
+class GitConfig:
+    """Git configuration manager."""
+
+    def __init__(self) -> None:
+        """Initialize Git configuration manager."""
+        self.home_dir = Path.home()
+        self.config_path = self.home_dir / ".gitconfig"
+
+    def setup(self, name: str, email: str, username: str) -> None:
+        """Set up Git configuration.
+
+        Args:
+            name: Profile name
+            email: Git email
+            username: Git username
+        """
+        try:
+            self._update_config(name, email, username)
+        except (OSError, configparser.Error) as e:
+            raise SystemConfigError(f"Failed to setup Git config: {e}")
+
+    def update(self, name: str, email: str, username: str) -> None:
+        """Update Git configuration.
+
+        Args:
+            name: Profile name
+            email: Git email
+            username: Git username
+        """
+        try:
+            self._update_config(name, email, username)
+        except (OSError, configparser.Error) as e:
+            raise SystemConfigError(f"Failed to update Git config: {e}")
+
+    def _update_config(self, name: str, email: str, username: str) -> None:
+        """Update Git configuration file.
+
+        Args:
+            name: Profile name
+            email: Git email
+            username: Git username
+        """
+        # Create parent directory if it doesn't exist
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Create config file if it doesn't exist
+        if not self.config_path.exists():
+            self.config_path.touch()
+
+        # Read existing config
+        config = configparser.ConfigParser()
+        config.read(self.config_path)
+
+        # Update user section
+        if "user" not in config:
+            config["user"] = {}
+        config["user"]["name"] = name
+        config["user"]["email"] = email
+        config["user"]["username"] = username
+
+        # Write config
+        with self.config_path.open("w") as f:
+            config.write(f)
+
+        # Set permissions
+        self.config_path.chmod(0o644)
 
 def update_gitconfig(
     config_path: Path,
     name: str,
     email: str,
-    username: Optional[str] = None,
+    username: str,
 ) -> None:
     """Update Git configuration file.
-    
+
     Args:
-        config_path: Path to .gitconfig file
-        name: Git user name
-        email: Git user email
-        username: Optional Git username for credentials
+        config_path: Path to Git config file
+        name: Profile name
+        email: Git email
+        username: Git username
     """
-    config = configparser.ConfigParser()
-    
-    # Read existing config if it exists
-    if config_path.exists():
+    try:
+        # Create parent directory if it doesn't exist
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Create config file if it doesn't exist
+        if not config_path.exists():
+            config_path.touch()
+
+        # Read existing config
+        config = configparser.ConfigParser()
         config.read(config_path)
-    
-    # Update user section
-    if "user" not in config:
-        config["user"] = {}
-    config["user"]["name"] = name
-    config["user"]["email"] = email
-    
-    # Update credential section if username is provided
-    if username:
-        if "credential" not in config:
-            config["credential"] = {}
-        config["credential"]["username"] = username
-    
-    # Write updated config
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    with config_path.open("w") as f:
-        config.write(f)
-    os.chmod(config_path, 0o644)
+
+        # Update user section
+        if "user" not in config:
+            config["user"] = {}
+        config["user"]["name"] = name
+        config["user"]["email"] = email
+        config["user"]["username"] = username
+
+        # Write config
+        with config_path.open("w") as f:
+            config.write(f)
+
+        # Set permissions
+        config_path.chmod(0o644)
+
+    except (OSError, configparser.Error) as e:
+        raise SystemConfigError(
+            f"Failed to update Git config: {e}",
+            details=f"Path: {config_path}",
+        )
 
 
 def create_directory_gitconfig(
     directory: Path,
     name: str,
     email: str,
-    username: Optional[str] = None,
+    username: str,
 ) -> None:
-    """Create a directory-specific Git configuration.
-    
+    """Create Git configuration file for a directory.
+
     Args:
         directory: Directory path
-        name: Git user name
-        email: Git user email
-        username: Optional Git username for credentials
+        name: Profile name
+        email: Git email
+        username: Git username
     """
-    # Ensure directory exists
-    directory = directory.expanduser().resolve()
-    directory.mkdir(parents=True, exist_ok=True)
-    
-    # Create .gitconfig in directory
-    config_path = directory / ".gitconfig"
-    update_gitconfig(config_path, name, email, username)
-    
-    # Update Git's global config to use directory config
-    git_dir_config = configparser.ConfigParser()
-    if "includeIf" not in git_dir_config:
-        git_dir_config["includeIf \"gitdir:{}\"".format(str(directory))] = {
-            "path": str(config_path)
-        }
-    
-    # Write to global config
-    global_config = Path.home() / ".gitconfig"
-    with global_config.open("a") as f:
-        git_dir_config.write(f) 
+    try:
+        # Create parent directory if it doesn't exist
+        directory.mkdir(parents=True, exist_ok=True)
+
+        # Create Git config
+        config_path = directory / ".git" / "config"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.touch()
+        config_path.chmod(0o644)
+
+        # Update Git config
+        subprocess.run(
+            ["git", "config", "--file", str(config_path), "user.name", username],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "config", "--file", str(config_path), "user.email", email],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise SystemConfigError(
+            f"Failed to update Git config: {e.stderr}",
+            details=f"Command: {' '.join(e.cmd)}\nOutput: {e.stdout}\nError: {e.stderr}",
+        )
+    except OSError as e:
+        raise SystemConfigError(
+            f"Failed to create Git config file: {e}",
+            details=f"Path: {config_path}",
+        )
