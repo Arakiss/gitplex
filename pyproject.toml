@@ -37,7 +37,7 @@ Documentation = "https://github.com/arakiss/gitplex#readme"
 "Bug Tracker" = "https://github.com/arakiss/gitplex/issues"
 
 [project.scripts]
-gitplex = "gitplex.cli:main"
+gitplex = "gitplex.cli:cli"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
