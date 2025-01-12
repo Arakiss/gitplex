@@ -656,6 +656,30 @@ files = [
 ]
 
 [[package]]
+name = "types-click"
+version = "7.1.8"
+description = "Typing stubs for click"
+optional = false
+python-versions = "*"
+groups = ["dev"]
+files = [
+    {file = "types-click-7.1.8.tar.gz", hash = "sha256:b6604968be6401dc516311ca50708a0a28baa7a0cb840efd7412f0dbbff4e092"},
+    {file = "types_click-7.1.8-py3-none-any.whl", hash = "sha256:8cb030a669e2e927461be9827375f83c16b8178c365852c060a34e24871e7e81"},
+]
+
+[[package]]
+name = "types-cryptography"
+version = "3.3.23.2"
+description = "Typing stubs for cryptography"
+optional = false
+python-versions = "*"
+groups = ["dev"]
+files = [
+    {file = "types-cryptography-3.3.23.2.tar.gz", hash = "sha256:09cc53f273dd4d8c29fa7ad11fefd9b734126d467960162397bc5e3e604dea75"},
+    {file = "types_cryptography-3.3.23.2-py3-none-any.whl", hash = "sha256:b965d548f148f8e87f353ccf2b7bd92719fdf6c845ff7cedf2abb393a0643e4f"},
+]
+
+[[package]]
 name = "typing-extensions"
 version = "4.12.2"
 description = "Backported and Experimental Type Hints for Python 3.8+"
@@ -670,4 +694,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11"
-content-hash = "30ef61c7b65d206c671a07d3191c0494c852711a13ecf434dc3717c5a42018e2"
+content-hash = "c34212d6c61846ba6a3f91ed0b00026c056a587b55040d92ddfead905e593df3"
