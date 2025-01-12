@@ -33,67 +33,97 @@ I built GitPlex to solve these challenges by:
 pip install gitplex
 ```
 
-2. Set up your first profile:
+2. Run the initial setup:
 
-```python
-from gitplex import ProfileManager
+```bash
+gitplex setup personal
+```
 
-# Initialize the manager
-manager = ProfileManager()
+The interactive setup will guide you through:
+- Configuring your Git identity (email, username)
+- Setting up workspace directories
+- Adding Git providers (GitHub, GitLab, Azure DevOps)
+- Generating and configuring SSH keys
 
-# Setup your personal profile
-manager.setup_profile(
-    name="personal",
-    email="personal@email.com",
-    username="personal-username",
-    directories=["~/Projects/personal"],
-    providers=["github", "gitlab"]
-)
+3. Switch between profiles:
+
+```bash
+gitplex switch work  # Switch to work profile
+gitplex switch personal  # Switch back to personal
 ```
 
 ## ✨ Features
 
-- 🔐 **Smart SSH Management**: Automated generation and configuration of SSH keys
-- 🎯 **Profile Isolation**: Separate configurations for different Git identities
-- 🌐 **Multi-Provider Support**: Works with GitHub, GitLab, Azure DevOps, and more
-- 📂 **Workspace Organization**: Structured directory management for different profiles
-- 🔄 **Easy Switching**: Seamless switching between different Git identities
-- 🛡️ **Security First**: Proper file permissions and SSH key protection
-- 🎨 **Cross-Platform**: Works on macOS, Linux, and Windows
+### Core Features
+- 🔐 **Smart SSH Management**: 
+  - Automated ED25519/RSA key generation
+  - Secure key permissions and storage
+  - SSH agent integration
+  - Provider-specific configurations
+
+- 🎯 **Profile Isolation**: 
+  - Separate Git configs per workspace
+  - Provider-specific usernames
+  - Directory-based profile switching
+  - Automatic config updates
+
+- 🌐 **Multi-Provider Support**: 
+  - GitHub
+  - GitLab
+  - Azure DevOps
+  - Bitbucket
+  - Custom enterprise setups
+
+- 📂 **Workspace Organization**: 
+  - Directory-based configurations
+  - Automatic workspace setup
+  - Profile-specific paths
+
+### Safety Features
+- 🛡️ **Automatic Backups**:
+  - Backup of existing configurations
+  - Timestamped backup archives
+  - Easy restoration
+  - Backup metadata tracking
+
+- ⚡ **System Checks**:
+  - Git installation verification
+  - SSH agent status check
+  - Configuration conflict detection
+  - Permission validation
+
+### User Experience
+- 🎨 **Beautiful CLI**:
+  - Rich color output
+  - Interactive prompts
+  - Progress indicators
+  - Clear error messages
+
+- 🔄 **Smart Defaults**:
+  - Interactive setup
+  - Configuration suggestions
+  - Safe operation modes
+  - Helpful warnings
 
 ## 📖 Project History
 
 GitPlex evolved from my personal scripts that I kept copying between machines whenever I needed to set up new Git environments. After years of manually managing multiple `.gitconfig` files and SSH keys, I decided to create a proper tool that would make this process seamless for everyone.
 
-Key features that make GitPlex unique:
-- Automated SSH key generation and management
-- Directory-based profile switching
-- Support for multiple Git providers
-- Cross-platform compatibility
-- Security-focused design
-
 ## ⚙️ Configuration
 
 ### Basic Profile Setup
 
-```python
-manager.setup_profile(
-    name="work",
-    email="work@company.com",
-    username="work-username",
-    directories=["~/Projects/work"],
-    providers=[
-        {
-            "name": "azure-devops",
-            "organization": "company",
-            "username": "work-azure"
-        },
-        {
-            "name": "github",
-            "username": "work-github"
-        }
-    ]
-)
+```bash
+# Interactive setup
+gitplex setup work
+
+# Non-interactive setup
+gitplex setup work \
+  --email work@company.com \
+  --username work-user \
+  --directory ~/Projects/work \
+  --provider github \
+  --provider gitlab
 ```
 
 ### Directory Structure
@@ -102,12 +132,16 @@ GitPlex creates and manages the following structure:
 
 ```
 ~
+├── .gitplex/
+│   ├── profiles.json
+│   └── backups/
+│       └── backup_20240112_120000/
 ├── .ssh/
 │   ├── config
-│   ├── personal_key
-│   ├── personal_key.pub
-│   ├── work_key
-│   └── work_key.pub
+│   ├── personal_github
+│   ├── personal_github.pub
+│   ├── work_gitlab
+│   └── work_gitlab.pub
 ├── .gitconfig
 └── Projects/
     ├── personal/
@@ -116,37 +150,47 @@ GitPlex creates and manages the following structure:
         └── .gitconfig
 ```
 
-### CLI Usage
-
-GitPlex can also be used from the command line:
+### CLI Commands
 
 ```bash
-# Setup new profile
-gitplex setup personal --email personal@email.com --username personal-user
-
-# List profiles
+# List all profiles
 gitplex list
 
 # Switch profile
 gitplex switch work
 
-# Backup profiles
-gitplex backup ./backup-dir
+# Create backup
+gitplex backup ./my-backup-dir
+
+# Restore backup
+gitplex restore ./my-backup-dir/backup_20240112_120000
 ```
 
 ## ❓ FAQ
 
-### Why the name "GitPlex"?
+### Is it safe to use?
 
-The name combines "Git" with "multiplex", reflecting the tool's ability to manage multiple Git identities and configurations simultaneously. Like a multiplexer that can handle multiple signals, GitPlex handles multiple Git profiles seamlessly.
+Yes! GitPlex takes several precautions:
+- Creates automatic backups before modifications
+- Uses secure permissions for SSH keys
+- Validates configurations before applying
+- Provides clear warnings and confirmations
 
 ### How does GitPlex handle SSH keys?
 
-GitPlex generates ED25519 SSH keys (or RSA as fallback) with proper permissions and passphrases. It automatically configures the SSH agent and manages the keys securely.
+GitPlex generates ED25519 SSH keys (or RSA as fallback) with:
+- Proper file permissions (600/644)
+- Secure key generation
+- Automatic SSH config updates
+- SSH agent integration
 
 ### Can I use GitPlex in a team?
 
-Yes! GitPlex is perfect for teams where developers need to manage multiple Git providers or maintain separate work/personal configurations.
+Yes! GitPlex is perfect for teams where developers need to:
+- Manage multiple Git providers
+- Switch between different projects
+- Maintain separate configurations
+- Share consistent setups
 
 ## 🛠️ Development Status
 
@@ -154,16 +198,24 @@ Yes! GitPlex is perfect for teams where developers need to manage multiple Git p
   - Ruff for linting and formatting
   - MyPy for static type checking
   - Comprehensive test coverage
+  - Clean code architecture
+
 - ✅ **Platform Support**: 
   - macOS
   - Linux
   - Windows
+
 - ✅ **Provider Support**:
   - GitHub
   - GitLab
   - Azure DevOps
   - Bitbucket
-- ✅ **Documentation**: Clear README and type hints
+
+- ✅ **Documentation**: 
+  - Clear README
+  - Type hints
+  - Docstrings
+  - Usage examples
 
 ## 🤝 Contributing
 
