@@ -20,10 +20,11 @@ As a developer, I found myself constantly struggling with:
 - Supporting multiple Git providers (GitHub, GitLab, Azure DevOps)
 
 I built GitPlex to solve these challenges by:
-- Automating SSH key management
+- Automating SSH key management with secure practices
 - Creating isolated workspace environments
 - Ensuring correct Git configurations
 - Supporting multiple Git providers seamlessly
+- Providing automatic backups and restoration
 
 ## 🚀 Quick Start
 
@@ -43,7 +44,8 @@ The interactive setup will guide you through:
 - Configuring your Git identity (email, username)
 - Setting up workspace directories
 - Adding Git providers (GitHub, GitLab, Azure DevOps)
-- Generating and configuring SSH keys
+- Generating and configuring SSH keys with proper permissions
+- Creating automatic backups of existing configurations
 
 3. Switch between profiles:
 
@@ -55,17 +57,20 @@ gitplex switch personal  # Switch back to personal
 ## ✨ Features
 
 ### Core Features
-- 🔐 **Smart SSH Management**: 
+- 🔐 **Advanced SSH Management**: 
   - Automated ED25519/RSA key generation
-  - Secure key permissions and storage
+  - Secure key permissions (600/644)
   - SSH agent integration
   - Provider-specific configurations
+  - Clear key fingerprint display
+  - Easy-to-copy public key format
 
 - 🎯 **Profile Isolation**: 
   - Separate Git configs per workspace
   - Provider-specific usernames
   - Directory-based profile switching
   - Automatic config updates
+  - Multiple email support
 
 - 🌐 **Multi-Provider Support**: 
   - GitHub
@@ -73,24 +78,28 @@ gitplex switch personal  # Switch back to personal
   - Azure DevOps
   - Bitbucket
   - Custom enterprise setups
+  - Provider-specific SSH configs
 
 - 📂 **Workspace Organization**: 
   - Directory-based configurations
   - Automatic workspace setup
   - Profile-specific paths
+  - Workspace isolation
 
 ### Safety Features
-- 🛡️ **Automatic Backups**:
-  - Backup of existing configurations
+- 🛡️ **Comprehensive Backups**:
+  - Automatic backup before changes
   - Timestamped backup archives
-  - Easy restoration
+  - Easy restoration process
   - Backup metadata tracking
+  - Separate Git/SSH backups
 
-- ⚡ **System Checks**:
+- ⚡ **System Validation**:
   - Git installation verification
   - SSH agent status check
   - Configuration conflict detection
   - Permission validation
+  - Key integrity checks
 
 ### User Experience
 - 🎨 **Beautiful CLI**:
@@ -98,12 +107,14 @@ gitplex switch personal  # Switch back to personal
   - Interactive prompts
   - Progress indicators
   - Clear error messages
+  - Helpful warnings
 
 - 🔄 **Smart Defaults**:
   - Interactive setup
   - Configuration suggestions
   - Safe operation modes
   - Helpful warnings
+  - Clear instructions
 
 ## 📖 Project History
 
@@ -136,12 +147,14 @@ GitPlex creates and manages the following structure:
 │   ├── profiles.json
 │   └── backups/
 │       └── backup_20240112_120000/
+│           ├── gitconfig_backup.tar
+│           └── ssh_backup.tar
 ├── .ssh/
 │   ├── config
-│   ├── personal_github
-│   ├── personal_github.pub
-│   ├── work_gitlab
-│   └── work_gitlab.pub
+│   ├── id_personal_ed25519
+│   ├── id_personal_ed25519.pub
+│   ├── id_work_ed25519
+│   └── id_work_ed25519.pub
 ├── .gitconfig
 └── Projects/
     ├── personal/
@@ -163,7 +176,17 @@ gitplex switch work
 gitplex backup ./my-backup-dir
 
 # Restore backup
-gitplex restore ./my-backup-dir/backup_20240112_120000
+gitplex restore ./my-backup-dir/backup_20240112_120000 --type git
+gitplex restore ./my-backup-dir/backup_20240112_120000 --type ssh
+
+# Add new provider to profile
+gitplex provider add work gitlab
+
+# Remove provider from profile
+gitplex provider remove work gitlab
+
+# Update profile settings
+gitplex update work --email new@work.com
 ```
 
 ## ❓ FAQ
@@ -172,17 +195,21 @@ gitplex restore ./my-backup-dir/backup_20240112_120000
 
 Yes! GitPlex takes several precautions:
 - Creates automatic backups before modifications
-- Uses secure permissions for SSH keys
+- Uses secure permissions for SSH keys (600/644)
 - Validates configurations before applying
 - Provides clear warnings and confirmations
+- Maintains separate backups for Git and SSH configs
 
 ### How does GitPlex handle SSH keys?
 
 GitPlex generates ED25519 SSH keys (or RSA as fallback) with:
 - Proper file permissions (600/644)
-- Secure key generation
+- Secure key generation parameters
 - Automatic SSH config updates
 - SSH agent integration
+- Clear fingerprint display
+- Easy-to-copy public key format
+- Provider-specific configurations
 
 ### Can I use GitPlex in a team?
 
@@ -191,6 +218,7 @@ Yes! GitPlex is perfect for teams where developers need to:
 - Switch between different projects
 - Maintain separate configurations
 - Share consistent setups
+- Follow security best practices
 
 ## 🛠️ Development Status
 
@@ -210,6 +238,7 @@ Yes! GitPlex is perfect for teams where developers need to:
   - GitLab
   - Azure DevOps
   - Bitbucket
+  - Enterprise Git servers
 
 - ✅ **Documentation**: 
   - Clear README

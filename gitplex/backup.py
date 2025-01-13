@@ -162,4 +162,4 @@ Host {host}
             f.write(new_config)
 
     # Set correct permissions
-    config_path.chmod(0o600) 
+    config_path.chmod(0o600)
