@@ -1,5 +1,6 @@
 """Command-line interface."""
 
+import sys
 from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
@@ -175,16 +176,26 @@ def setup(
         passphrase=passphrase,
     )
 
-    # Update SSH config for each provider
+    # Configure SSH for all providers first
     ssh_config = SSHConfig()
+    print_info("\n=== Configuring SSH Keys ===")
     for p in provider:
-        print_info(f"Configuring SSH for {p}...")
         ssh_manager.configure_for_provider(ssh_key, p, ssh_config)
-        print_ssh_key(ssh_key, p)
+
+    # Then show the SSH key and instructions once
+    print_info("\n=== Your SSH Public Key ===")
+    print_info("Copy this key to your Git providers:")
+    print_ssh_key(ssh_key, provider[0])
+
+    # Show provider-specific instructions
+    print_info("\n=== Provider Setup Instructions ===")
+    for p in provider:
+        print_info(f"\n{p.upper()} Setup:")
         print_info(ssh_manager.get_provider_instructions(ssh_key, p))
+        print_info("\n" + "─" * 80 + "\n")  # Separator line
 
     # Create profile
-    print_info("Creating Git profile...")
+    print_info("=== Creating Git Profile ===")
     profile_manager = ProfileManager()
     profile = profile_manager.setup_profile(
         name=name,
@@ -195,13 +206,14 @@ def setup(
         ssh_key=str(ssh_key.private_key),
     )
 
-    print_success(f"Profile '{profile.name}' created successfully!")
+    print_success(f"\nProfile '{profile.name}' created successfully!")
     print_info(
-        "\nNext steps:\n"
+        "\n=== Next Steps ===\n"
         "1. Add your SSH key to each Git provider (see instructions above)\n"
         "2. Test your configuration with: git clone git@github.com:username/repo.git\n"
-        f"3. Switch to this profile anytime with: gitplex switch {profile.name}"
+        f"3. Switch to this profile anytime with: gitplex switch {profile.name}\n"
     )
+    sys.exit(0)  # Ensure clean exit
 
 
 @cli.command()

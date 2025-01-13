@@ -1,5 +1,6 @@
 """Terminal UI components and utilities."""
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -232,32 +233,14 @@ def print_ssh_key(key: SSHKey, provider: str) -> None:
     console.print(public_key)
     console.print("\n")
 
-    # Then show the detailed instructions
-    message = f"""
-### Instructions for {provider.title()}
-
-1. Copy the SSH key above
-2. Go to {provider.title()} → Settings → SSH Keys
-3. Click "New SSH Key" or "Add SSH Key"
-4. Title: GitPlex Key ({key.type.value})
-5. Paste the key and save
-
-Key Details:
-"""
-
     # Get the key fingerprint
     try:
-        import subprocess
         result = subprocess.run(
             ["ssh-keygen", "-l", "-f", str(key.public_key)],
             capture_output=True,
             text=True,
-            check=True,
         )
-        message += f"\n```\n{result.stdout.strip()}\n```"
-    except subprocess.CalledProcessError:
-        message += "\n[Could not retrieve fingerprint]"
-
-    # Print the formatted message
-    console.print(Markdown(message))
-    console.print("\n")
+        if result.returncode == 0:
+            print_info(f"Key fingerprint: {result.stdout.strip()}")
+    except Exception:
+        pass

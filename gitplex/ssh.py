@@ -395,20 +395,20 @@ class SSHKeyManager:
         """Format instructions for a specific provider."""
         return f"""
 ╭──────────────────── {provider} SSH Key Setup ────────────────────╮
-│ 1. Go to: {url}
-│ 2. Title: GitPlex Key ({key.type.value})
-│ 3. Key Type: Authentication Key
 │
-│ Your SSH Public Key:
-╰─────────────────────────────────────────────────────────────╯
-{public_key}
-
-╭─────────────────────── Key Details ───────────────────────╮
-│ Fingerprint: {fingerprint}
-│ Type: {key.type.value.upper()}
-│ Location: {key.private_key}
-╰───────────────────────────────────────────────────────────╯
-"""
+│  1. Go to: {url}
+│  2. Title: GitPlex Key ({key.type.value})
+│  3. Key Type: Authentication Key
+│
+│  Your SSH Public Key:
+│  {public_key}
+│
+│  Key Details:
+│  • Fingerprint: {fingerprint}
+│  • Type: {key.type.value.upper()}
+│  • Location: {key.private_key}
+│
+╰───────────────────────────────────────────────────────────────╯"""
 
     def configure_for_provider(self, key: SSHKey, provider: str, ssh_config: SSHConfigProtocol) -> None:
         """Configure SSH for a specific provider.
@@ -418,6 +418,5 @@ class SSHKeyManager:
             provider: The Git provider to configure for
             ssh_config: The SSH configuration manager
         """
-        print_info(f"Configuring SSH for {provider}...")
+        # Only update the SSH config
         ssh_config._update_config(key, f"{provider}.com")
-        print_info(self.get_provider_instructions(key, provider))
