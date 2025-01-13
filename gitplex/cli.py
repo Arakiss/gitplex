@@ -15,7 +15,7 @@ from .backup import (
 )
 from .exceptions import ProfileError, SystemConfigError
 from .profile import ProfileManager
-from .ssh import KeyType, SSHKeyManager
+from .ssh import KeyType, SSHKeyManager, SSHConfig
 from .system import check_system_compatibility, get_home_dir
 from .ui import (
     confirm_action,
@@ -176,10 +176,11 @@ def setup(
     )
 
     # Update SSH config for each provider
+    ssh_config = SSHConfig()
     for p in provider:
         print_info(f"Configuring SSH for {p}...")
-        ssh_manager.update_config(ssh_key, f"{p}.com")
-        print_ssh_key(ssh_key.public_key_content, p)
+        ssh_manager.configure_for_provider(ssh_key, p, ssh_config)
+        print_ssh_key(ssh_key, p)
         print_info(ssh_manager.get_provider_instructions(ssh_key, p))
 
     # Create profile

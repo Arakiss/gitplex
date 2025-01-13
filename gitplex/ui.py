@@ -3,29 +3,21 @@
 from pathlib import Path
 from typing import Any
 
-from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.prompt import Confirm, Prompt
+from rich.prompt import Prompt
 from rich.table import Table
-from rich.theme import Theme
-from rich.syntax import Syntax
 
 from .exceptions import SystemConfigError
-
-# Create a custom theme for consistent styling
-theme = Theme({
-    "info": "cyan",
-    "warning": "yellow",
-    "error": "red",
-    "success": "green",
-    "title": "bold cyan",
-    "subtitle": "italic cyan",
-    "highlight": "bold yellow",
-    "path": "blue",
-    "command": "green",
-})
-
-console = Console(theme=theme)
+from .ssh import SSHKey
+from .ui_common import (
+    confirm_action,
+    console,
+    print_error,
+    print_info,
+    print_success,
+    print_warning,
+)
 
 BANNER = """
  ██████╗ ██╗████████╗██████╗ ██╗     ███████╗██╗  ██╗
@@ -36,10 +28,11 @@ BANNER = """
  ╚═════╝ ╚═╝   ╚═╝   ╚═╝     ╚══════╝╚══════╝╚═╝  ╚═╝
 """
 
+
 def print_welcome() -> None:
     """Print welcome message and guide."""
     console.print(Panel(BANNER, style="cyan", border_style="blue"))
-    
+
     welcome_panel = Panel.fit(
         "[title]Welcome to GitPlex![/]\n\n"
         "🔄 The smart Git profile manager that helps you maintain multiple Git identities.\n\n"
@@ -62,66 +55,27 @@ def print_welcome() -> None:
     console.print(welcome_panel)
 
 
-def print_error(message: str, details: str | None = None) -> None:
-    """Print an error message."""
-    # Create plain text without any markup
-    error_text = f"❌ {message}"
-    if details:
-        error_text += f"\n\n{details}"
+def get_user_input(prompt: str, default: str | None = None, required: bool = False) -> str:
+    """Get user input with optional default value.
     
-    # Create panel with raw text
-    panel = Panel.fit(
-        error_text,
-        style="error",
-        border_style="red",
-    )
-    # Print without interpreting markup
-    console.print(panel, markup=False)
-
-
-def print_warning(message: str) -> None:
-    """Print a warning message."""
-    panel = Panel.fit(
-        f"⚠️  {message}",
-        style="warning",
-        border_style="yellow",
-    )
-    console.print(panel)
-
-
-def print_success(message: str) -> None:
-    """Print a success message."""
-    panel = Panel.fit(
-        f"✅ {message}",
-        style="success",
-        border_style="green",
-    )
-    console.print(panel)
-
-
-def print_info(message: str) -> None:
-    """Print an informational message."""
-    panel = Panel.fit(
-        f"ℹ️  {message}",
-        style="info",
-        border_style="blue",
-    )
-    console.print(panel)
-
-
-def confirm_action(message: str, default: bool = True) -> bool:
-    """Ask for user confirmation."""
-    return Confirm.ask(f"[highlight]{message}[/] [y/n]", default=default)
-
-
-def get_user_input(prompt: str, default: str | None = None) -> str:
-    """Get user input with optional default value."""
+    Args:
+        prompt: The prompt to show to the user
+        default: Optional default value
+        required: Whether the input is required (can't be empty)
+    """
     styled_prompt = f"[highlight]{prompt}[/]"
-    if default:
-        # Escape any square brackets in the default value
-        escaped_default = str(default).replace("[", "\\[").replace("]", "\\]")
-        return Prompt.ask(f"{styled_prompt} ({escaped_default})") or default
-    return Prompt.ask(styled_prompt)
+    while True:
+        if default:
+            # Escape any square brackets in the default value
+            escaped_default = str(default).replace("[", "\\[").replace("]", "\\]")
+            value = Prompt.ask(f"{styled_prompt} ({escaped_default})") or default
+        else:
+            value = Prompt.ask(styled_prompt)
+        
+        if required and not value:
+            print_warning("This field is required. Please enter a value.")
+            continue
+        return value
 
 
 def print_profile_table(profiles: list[dict[str, Any]]) -> None:
@@ -221,10 +175,9 @@ def prompt_directory(profile_name: str = "") -> str:
 def prompt_name() -> str:
     """Prompt for profile name."""
     print_info(
-        "Choose a name for your Git profile\n"
-        "Examples: personal, work, opensource"
+        "Choose a name for your Git profile\nExamples: personal, work, opensource"
     )
-    return get_user_input("Enter profile name")
+    return get_user_input("Enter profile name", required=True)
 
 
 def prompt_email() -> str:
@@ -233,7 +186,7 @@ def prompt_email() -> str:
         "Enter the email address for this Git profile\n"
         "This will be used in your commits"
     )
-    return get_user_input("Enter Git email")
+    return get_user_input("Enter Git email", required=True)
 
 
 def prompt_username() -> str:
@@ -242,7 +195,7 @@ def prompt_username() -> str:
         "Enter your Git username for this profile\n"
         "This will be used in your commits"
     )
-    return get_user_input("Enter Git username")
+    return get_user_input("Enter Git username", required=True)
 
 
 def prompt_providers(default: str = "github") -> list[str]:
@@ -269,25 +222,42 @@ def confirm_backup() -> bool:
     )
 
 
-def print_ssh_key(public_key: str, provider: str) -> None:
-    """Print SSH public key in a formatted panel with copy instructions."""
-    # Format the key with syntax highlighting
-    key_syntax = Syntax(public_key, "ssh-key", theme="monokai", word_wrap=True)
-    
-    # Create a panel with the key and instructions
-    key_panel = Panel.fit(
-        f"[bold]Your SSH Public Key for {provider.title()}[/]\n\n"
-        f"{key_syntax}\n\n"
-        "[subtitle]Instructions:[/]\n"
-        "1. Copy the entire key above (including ssh-ed25519/ssh-rsa prefix)\n"
-        "2. Go to your Git provider's SSH key settings\n"
-        "3. Add a new SSH key and paste the copied content\n"
-        "4. Give it a memorable name (e.g., 'GitPlex Key')\n\n"
-        "[info]Tip: The key has been formatted for easy copying[/]",
-        title="🔑 SSH Key",
-        border_style="green",
-    )
-    
+def print_ssh_key(key: SSHKey, provider: str) -> None:
+    """Print SSH key information in a clear, copiable format."""
+    # Read and format the public key content
+    public_key = key.public_key_content.strip()
+
+    # Show the key in plain format for easy copying
     console.print("\n")
-    console.print(key_panel)
+    console.print(public_key)
+    console.print("\n")
+
+    # Then show the detailed instructions
+    message = f"""
+### Instructions for {provider.title()}
+
+1. Copy the SSH key above
+2. Go to {provider.title()} → Settings → SSH Keys
+3. Click "New SSH Key" or "Add SSH Key"
+4. Title: GitPlex Key ({key.type.value})
+5. Paste the key and save
+
+Key Details:
+"""
+
+    # Get the key fingerprint
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["ssh-keygen", "-l", "-f", str(key.public_key)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        message += f"\n```\n{result.stdout.strip()}\n```"
+    except subprocess.CalledProcessError:
+        message += "\n[Could not retrieve fingerprint]"
+
+    # Print the formatted message
+    console.print(Markdown(message))
     console.print("\n")
