@@ -80,4 +80,11 @@ def print_info(message: str, no_panel: bool = False) -> None:
 
 def confirm_action(message: str, default: bool = True) -> bool:
     """Ask for user confirmation."""
-    return Confirm.ask(f"[highlight]{message}[/] [y/n]", default=default)
+    try:
+        return Confirm.ask(
+            f"[highlight]{message}[/]",
+            default=default,
+            show_default=True,
+        )
+    except KeyboardInterrupt:
+        return False

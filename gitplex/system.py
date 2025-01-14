@@ -4,10 +4,16 @@ import json
 import os
 import shutil
 import subprocess
+import logging
 from datetime import datetime
 from pathlib import Path
+import platform
+from typing import Any, Dict
 
 from gitplex.exceptions import BackupError, SystemConfigError
+from gitplex.ui import print_warning, print_info
+
+logger = logging.getLogger(__name__)
 
 
 def check_git_installation() -> tuple[bool, str]:
@@ -16,6 +22,7 @@ def check_git_installation() -> tuple[bool, str]:
     Returns:
         Tuple of (is_installed, version_string)
     """
+    logger.debug("Checking Git installation")
     try:
         result = subprocess.run(
             ["git", "--version"],
@@ -23,13 +30,16 @@ def check_git_installation() -> tuple[bool, str]:
             capture_output=True,
             text=True,
         )
+        logger.debug(f"Git version: {result.stdout.strip()}")
         return True, result.stdout.strip()
     except subprocess.CalledProcessError as e:
+        logger.error(f"Git check failed: {e.stderr}")
         raise SystemConfigError(
             "Git is not installed or not accessible",
             details=f"Error: {e.stderr}",
         )
     except FileNotFoundError:
+        logger.error("Git not found")
         raise SystemConfigError(
             "Git is not installed",
             details="Please install Git to use this tool",
@@ -42,6 +52,7 @@ def check_ssh_agent() -> bool:
     Returns:
         True if SSH agent is running
     """
+    logger.debug("Checking SSH agent")
     try:
         result = subprocess.run(
             ["ssh-add", "-l"],
@@ -49,15 +60,19 @@ def check_ssh_agent() -> bool:
             capture_output=True,
             text=True,
         )
+        logger.debug("SSH agent check successful")
         return True
     except subprocess.CalledProcessError as e:
+        logger.debug(f"SSH agent check returned code {e.returncode}")
         if e.returncode == 1:  # No identities
             return True
+        logger.error("SSH agent not running")
         raise SystemConfigError(
             "SSH agent is not running",
             details="Please start the SSH agent with 'eval $(ssh-agent)'",
         )
     except FileNotFoundError:
+        logger.error("SSH not installed")
         raise SystemConfigError(
             "SSH is not installed",
             details="Please install OpenSSH to use this tool",
@@ -65,14 +80,19 @@ def check_ssh_agent() -> bool:
 
 
 def get_home_dir() -> Path:
-    """Get home directory.
-
-    Returns:
-        Home directory path
-    """
-    if "GITPLEX_TEST_HOME" in os.environ:
-        return Path(os.environ["GITPLEX_TEST_HOME"])
-    return Path.home()
+    """Get the user's home directory based on the OS."""
+    os_info = get_os_info()
+    system = os_info["system"]
+    
+    if system == "windows":
+        # On Windows, we use USERPROFILE
+        home = Path(subprocess.getoutput("echo %USERPROFILE%"))
+    else:
+        # On Unix-like systems (Linux, macOS), we use HOME
+        home = Path(subprocess.getoutput("echo $HOME"))
+    
+    logger.debug(f"Using home directory: {home}")
+    return home
 
 
 def get_existing_configs() -> dict[str, Path]:
@@ -144,20 +164,89 @@ def create_backup(
 
 
 def check_system_compatibility() -> None:
-    """Check if the system has all required dependencies."""
+    """Check if the current system is compatible with GitPlex."""
+    os_info = get_os_info()
+    logger.debug(f"Starting system compatibility check")
+    logger.debug(f"Detected OS info: {os_info}")
+    
+    # Log OS information
+    logger.debug(f"Running on {os_info['system']} {os_info['release']} ({os_info['machine']})")
+    
+    # Display OS information to user
+    print_info(f"Running on {get_os_display_name()}")
+    
+    # Check Git installation
+    logger.debug("Checking Git installation")
     try:
-        # Check Git installation
-        is_git_installed, git_version = check_git_installation()
-        print("Git version:", git_version)
-
-        # Check SSH agent
-        if check_ssh_agent():
-            print("SSH agent is running")
-    except SystemConfigError as e:
-        raise SystemConfigError(
-            "System compatibility check failed",
-            details=f"{e.message}\n{e.details}",
+        result = subprocess.run(
+            ["git", "--version"],
+            capture_output=True,
+            text=True,
+            check=True
         )
+        git_version = result.stdout.strip()
+        logger.debug(f"Git version: {git_version}")
+        print_info(f"Git version: {git_version}")
+    except subprocess.CalledProcessError:
+        raise SystemConfigError("Git is not installed or not accessible")
+    
+    # Check SSH agent
+    logger.debug("Checking SSH agent")
+    result = subprocess.run(
+        ["ssh-add", "-l"],
+        capture_output=True,
+        text=True
+    )
+    logger.debug(f"SSH agent check returned code {result.returncode}")
+    
+    if result.returncode == 2:
+        raise SystemConfigError(
+            "SSH agent is not running. Please start it with:\n"
+            "eval `ssh-agent -s`"
+        )
+    
+    logger.debug("System compatibility check completed successfully")
+
+
+def _check_ssh_agent_windows() -> None:
+    """Check SSH agent on Windows."""
+    try:
+        result = subprocess.run(
+            ["sc", "query", "ssh-agent"],
+            capture_output=True,
+            text=True
+        )
+        if "RUNNING" not in result.stdout:
+            print_warning(
+                "SSH agent is not running on Windows. "
+                "Please enable OpenSSH Authentication Agent service"
+            )
+    except subprocess.CalledProcessError as e:
+        logger.error("Failed to check SSH agent status on Windows", exc_info=True)
+        raise SystemConfigError(
+            "Unable to verify SSH agent status on Windows"
+        ) from e
+
+
+def _check_ssh_agent_unix(os_name: str) -> None:
+    """Check SSH agent on Unix-like systems."""
+    try:
+        result = subprocess.run(
+            ["ssh-add", "-l"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 2:
+            print_warning(
+                f"SSH agent is not running on {os_name}. "
+                "Please start it with: eval `ssh-agent -s`"
+            )
+        logger.debug(f"SSH agent check returned code {result.returncode}")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to check SSH agent status on {os_name}", exc_info=True)
+        raise SystemConfigError(
+            f"Unable to verify SSH agent status on {os_name}"
+        ) from e
 
 
 def restore_backup(backup_path: Path) -> None:
@@ -190,3 +279,36 @@ def restore_backup(backup_path: Path) -> None:
             "Failed to restore backup",
             f"Error: {str(e)}"
         ) from e
+
+
+def get_os_info() -> Dict[str, Any]:
+    """Get detailed information about the operating system.
+    
+    Returns:
+        Dictionary containing OS information
+    """
+    return {
+        'system': platform.system().lower(),
+        'release': platform.release(),
+        'version': platform.version(),
+        'machine': platform.machine(),
+        'processor': platform.processor()
+    }
+
+def get_os_display_name() -> str:
+    """Get a user-friendly display name for the current OS.
+    
+    Returns:
+        String containing OS name and version
+    """
+    os_info = get_os_info()
+    system = os_info['system']
+    
+    if system == 'darwin':
+        return f"macOS {os_info['release']}"
+    elif system == 'linux':
+        return f"Linux {os_info['release']}"
+    elif system == 'windows':
+        return f"Windows {os_info['release']}"
+    else:
+        return f"Unknown OS ({system} {os_info['release']})"

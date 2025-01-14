@@ -2,8 +2,9 @@
 
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
+from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
@@ -19,6 +20,7 @@ from .ui_common import (
     print_success,
     print_warning,
 )
+from .providers import ProviderManager
 
 BANNER = """
  ██████╗ ██╗████████╗██████╗ ██╗     ███████╗██╗  ██╗
@@ -199,21 +201,45 @@ def prompt_username() -> str:
     return get_user_input("Enter Git username", required=True)
 
 
-def prompt_providers(default: str = "github") -> list[str]:
-    """Prompt for Git providers."""
-    providers = ["github", "gitlab", "bitbucket"]
-    print_info(
-        "Choose your Git provider(s)\n"
-        "Available providers: " + ", ".join(f"[highlight]{p}[/]" for p in providers)
+def prompt_providers() -> list[str]:
+    """Prompt for Git providers.
+    
+    Returns:
+        List of selected providers
+    """
+    valid_providers = ["github", "gitlab", "bitbucket", "azure"]
+    providers = []
+    
+    while True:
+        provider = Prompt.ask(
+            "Enter Git provider",
+            default="github",
+            show_default=True,
+        ).strip().lower()
+        
+        if provider not in valid_providers:
+            print_warning(f"Invalid provider. Valid providers are: {', '.join(valid_providers)}")
+            continue
+            
+        providers.append(provider)
+        if not confirm_action("Add another provider?", default=False):
+            break
+    
+    return providers
+
+
+def print_ssh_key(key: SSHKey, provider: str | None = None) -> None:
+    """Print SSH key information."""
+    console.print(key.public_key_content + "\n", style="bold")
+    
+    # Get key fingerprint
+    result = subprocess.run(
+        ["ssh-keygen", "-l", "-f", str(key.public_key)],
+        capture_output=True,
+        text=True,
     )
-    provider = get_user_input(
-        "Enter Git provider",
-        default=default,
-    )
-    if provider not in providers:
-        print_warning(f"Invalid provider '{provider}', using default: {default}")
-        provider = default
-    return [provider]
+    if result.returncode == 0:
+        console.print(f"Key fingerprint: {result.stdout.strip()}", style="info")
 
 
 def confirm_backup() -> bool:
@@ -221,26 +247,3 @@ def confirm_backup() -> bool:
     return confirm_action(
         "Existing Git configurations found. Would you like to back them up?",
     )
-
-
-def print_ssh_key(key: SSHKey, provider: str) -> None:
-    """Print SSH key information in a clear, copiable format."""
-    # Read and format the public key content
-    public_key = key.public_key_content.strip()
-
-    # Show the key in plain format for easy copying
-    console.print("\n")
-    console.print(public_key)
-    console.print("\n")
-
-    # Get the key fingerprint
-    try:
-        result = subprocess.run(
-            ["ssh-keygen", "-l", "-f", str(key.public_key)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            print_info(f"Key fingerprint: {result.stdout.strip()}")
-    except Exception:
-        pass
