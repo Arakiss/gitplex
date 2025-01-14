@@ -21,11 +21,18 @@ from .ssh import KeyType, SSHKeyManager, SSHConfig
 from .system import check_system_compatibility, get_home_dir
 from .ui import (
     confirm_action,
+    confirm_git_setup,
+    get_user_input,
     print_error,
+    print_git_config_preview,
+    print_git_setup_summary,
     print_info,
+    print_profile_info,
     print_profile_table,
+    print_setup_steps,
     print_ssh_key,
     print_success,
+    print_warning,
     print_welcome,
     prompt_directory,
     prompt_email,
@@ -69,7 +76,7 @@ def handle_errors(f: F) -> F:
             # Escape error message for display
             escaped_message = str(e).replace("[", "\\[").replace("]", "\\]")
             logger.error(f"Unexpected error: {escaped_message}", exc_info=True)
-            print_error("Unexpected error", escaped_message)
+            print_error(f"Unexpected error:\n{escaped_message}")
             raise click.Abort() from e
     return cast(F, wrapper)
 
@@ -97,172 +104,131 @@ def cli(debug: bool) -> None:
 
 
 @cli.command()
-@click.argument("name", required=False)
+@click.option("--name", help="Profile name")
+@click.option("--force", is_flag=True, help="Force overwrite if profile exists")
 @click.option("--email", help="Git email")
 @click.option("--username", help="Git username")
 @click.option(
     "--directory",
-    help="Working directory",
+    help="Workspace directories",
     multiple=True,
-    type=click.Path(resolve_path=True),
-)
-@click.option("--provider", help="Git provider", multiple=True)
-@click.option("--non-interactive", is_flag=True, help="Run in non-interactive mode")
-@click.option("--no-backup", is_flag=True, help="Skip backup of existing configurations")
-@click.option(
-    "--key-type",
-    type=click.Choice(["ed25519", "rsa"]),
-    default="ed25519",
-    help="SSH key type (default: ed25519)",
+    type=click.Path(exists=False, file_okay=False, path_type=Path),
 )
 @click.option(
-    "--key-bits",
-    type=int,
-    default=4096,
-    help="Key size in bits (only for RSA, default: 4096)",
+    "--provider",
+    help="Git providers",
+    multiple=True,
 )
 @click.option(
-    "--passphrase",
-    help="SSH key passphrase (default: none)",
-    default="",
-)
-@click.option(
-    "--use-existing-key",
+    "--non-interactive",
     is_flag=True,
-    help="Use existing SSH key if found",
+    help="Run in non-interactive mode",
 )
+@click.option(
+    "--no-backup",
+    is_flag=True,
+    help="Skip backing up existing configurations",
+)
+@handle_errors
 def setup(
-    name: str | None,
-    email: str | None,
-    username: str | None,
-    directory: tuple[str, ...] | None,
-    provider: tuple[str, ...] | None,
-    non_interactive: bool,
-    no_backup: bool,
-    key_type: str,
-    key_bits: int,
-    passphrase: str,
-    use_existing_key: bool,
+    name: str | None = None,
+    force: bool = False,
+    email: str | None = None,
+    username: str | None = None,
+    directory: tuple[Path, ...] | None = None,
+    provider: tuple[str, ...] | None = None,
+    non_interactive: bool = False,
+    no_backup: bool = False,
 ) -> None:
-    """Set up a new Git profile."""
+    """Set up a new Git profile with Git and SSH configurations."""
     try:
         logger.debug("Starting setup command")
         print_welcome()
-        home_dir = get_home_dir()
-        print_info(f"Using home directory: {home_dir}")
+        
+        # Show important warning
+        print_warning(
+            "⚠️  IMPORTANT: This tool modifies your Git and SSH configurations. "
+            "While it creates backups by default, you should use it at your own risk. "
+            "Make sure you understand the changes it will make to your system."
+        )
+        if not confirm_action("Do you understand and wish to continue?", default=False):
+            print_info("Setup cancelled.")
+            return
+            
+        # Show setup steps
+        print_setup_steps()
         
         # System compatibility check
         logger.debug("Running system compatibility check")
         check_system_compatibility()
-        print_info("─" * 50)
         
-        # Check existing configurations
-        logger.debug("Checking existing configurations")
-        configs = check_existing_configs()
-        if (configs["git_config_exists"] or configs["ssh_config_exists"]) and not no_backup:
-            if confirm_action(
-                "Existing Git/SSH configurations found. Would you like to back them up?"
-            ):
-                backup_configs()
-
-        if non_interactive and not all([name, email, username, directory, provider]):
-            raise SystemConfigError(
-                "When using --non-interactive, you must provide all required options:\n"
-                "--name, --email, --username, --directory, and --provider"
-            )
-
-        # Get profile information
-        logger.debug("Collecting profile information")
+        # Check and backup existing configurations
+        if not no_backup:
+            configs = check_existing_configs()
+            if configs["git_config_exists"] or configs["ssh_config_exists"]:
+                print_info("Found existing Git/SSH configurations.")
+                if confirm_action("Would you like to back them up before proceeding?", default=True):
+                    backup_path = backup_configs()
+                    print_success(f"Configurations backed up to: {backup_path}")
+                    print_info("You can restore them later with: gitplex restore --backup-path <path>")
+        
+        # Initialize managers
+        profile_manager = ProfileManager()
+        
+        # Collect all profile information first
         if not name:
             name = prompt_name()
+        
         if not email:
             email = prompt_email()
+        
         if not username:
             username = prompt_username()
-        if not directory:
-            directory = (prompt_directory(name),)
+        
         if not provider:
             provider = tuple(prompt_providers())
-
-        logger.debug(f"Profile information collected: name={name}, email={email}, "
-                    f"username={username}, directory={directory}, provider={provider}")
-
-        # Ensure directories exist and convert to absolute paths
-        directories = [ensure_directory(d) for d in directory]
-        logger.debug(f"Directories validated: {directories}")
-
-        # Handle SSH key setup
-        logger.debug("Setting up SSH key")
-        ssh_manager = SSHKeyManager()
-        existing_key = ssh_manager.get_existing_key(name, KeyType(key_type))
-        logger.debug(f"Existing key found: {existing_key is not None}")
         
-        if existing_key and (use_existing_key or confirm_action(
-            "Would you like to use this existing SSH key for your Git profile?"
-        )):
-            ssh_key = existing_key
-            logger.debug("Using existing SSH key")
-            print_info("Using existing SSH key configuration.")
-        else:
-            logger.debug("Generating new SSH key")
-            print_info("Generating new SSH key pair...")
-            ssh_key = ssh_manager.generate_key(
-                name=name,
-                email=email,
-                key_type=KeyType(key_type),
-                bits=key_bits,
-                passphrase=passphrase,
+        if not directory:
+            default_dir = Path.home() / name.lower()
+            workspace_dir = prompt_directory(default_dir)
+            directory = (Path(workspace_dir),)
+        
+        # Now check for conflicts
+        has_conflict, conflicting_profile = profile_manager.has_provider_conflict(list(provider), email)
+        if has_conflict:
+            print_warning(
+                f"Profile '{conflicting_profile}' already exists with different email "
+                f"for providers: {', '.join(provider)}."
             )
-
-        # Show the SSH key and instructions
-        logger.debug("Displaying SSH key information")
-        print_info("\n=== Your SSH Public Key ===")
-        print_info("Copy this key to your Git providers:")
-        print_ssh_key(ssh_key)
-
-        # Show provider-specific instructions
-        print_info("\n=== Provider Setup Instructions ===")
-        for p in provider:
-            try:
-                logger.debug(f"Showing instructions for provider: {p}")
-                print_info(f"\n{p.upper()} Setup:")
-                print_info(ssh_manager.get_provider_instructions(ssh_key, p.lower()))
-                print_info("\n" + "─" * 80 + "\n")  # Separator line
-            except Exception as e:
-                logger.warning(f"Failed to show instructions for provider {p}: {e}")
-                continue
-
+            if not confirm_action("Would you like to continue and create a new profile anyway?", default=False):
+                print_info("Setup cancelled.")
+                return
+            force = True
+        elif profile_manager.profile_exists(name):
+            print_warning(f"Profile '{name}' already exists.")
+            if not confirm_action("Would you like to overwrite it?", default=False):
+                print_info("Setup cancelled. Please try again with a different profile name.")
+                return
+            force = True
+        
         # Create profile
-        logger.debug("Creating Git profile")
-        print_info("=== Creating Git Profile ===")
-        profile_manager = ProfileManager()
-        try:
-            profile = profile_manager.setup_profile(
-                name=name,
-                email=email,
-                username=username,
-                directories=directories,
-                providers=[p.lower() for p in provider],
-                ssh_key=str(ssh_key.private_key),
-            )
-        except Exception as e:
-            logger.error("Failed to create profile", exc_info=True)
-            print_error(f"Failed to create profile: {str(e)}")
-            sys.exit(1)
-
-        logger.debug("Profile created successfully")
-        print_success(f"\nProfile '{profile.name}' created successfully!")
-        print_info(
-            "\n=== Next Steps ===\n"
-            "1. Add your SSH key to each Git provider (see instructions above)\n"
-            "2. Test your configuration with: git clone git@github.com:username/repo.git\n"
-            f"3. Switch to this profile anytime with: gitplex switch {profile.name}\n"
+        profile_manager.create_profile(
+            name=name,
+            email=email,
+            username=username,
+            providers=list(provider),
+            directories=[str(d) for d in directory],
+            force=force
         )
-        sys.exit(0)
+        
+        print_success(f"Profile '{name}' created successfully!")
+        print("\n[dim]Need help? Run [cyan]gitplex --help[/cyan] for more information[/dim]")
+        return
+        
     except Exception as e:
-        logger.error("Setup failed", exc_info=True)
-        print_error(f"Setup failed: {str(e)}")
-        sys.exit(1)
+        logger.error(f"Setup failed: {e}", exc_info=True)
+        print_error(f"Setup failed: {e}")
+        raise
 
 
 @cli.command()
