@@ -6,10 +6,9 @@ import subprocess
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from gitplex.exceptions import ProfileError, SystemConfigError
-from gitplex.git import GitConfig
 from gitplex.ssh import SSHConfig
 from gitplex.system import get_home_dir
 
@@ -29,19 +28,14 @@ class Profile:
     email: str
     username: str
     directories: List[Path]
-    providers: List[GitProvider]
+    providers: List[str]
+    ssh_key: Optional[str] = None
     active: bool = False
 
     def __post_init__(self):
-        """Convert string paths to Path objects and string providers to GitProvider."""
+        """Convert string paths to Path objects."""
         if isinstance(self.directories[0], str):
             self.directories = [Path(d) for d in self.directories]
-        if isinstance(self.providers[0], str):
-            try:
-                self.providers = [GitProvider(p.lower()) for p in self.providers]
-            except ValueError as e:
-                valid_providers = ", ".join(p.value for p in GitProvider)
-                raise ProfileError(f"Invalid Git provider. Valid providers are: {valid_providers}") from e
 
     def to_dict(self) -> dict:
         """Convert profile to dictionary for serialization."""
@@ -50,7 +44,8 @@ class Profile:
             "email": self.email,
             "username": self.username,
             "directories": [str(d) for d in self.directories],
-            "providers": [p.value for p in self.providers],
+            "providers": self.providers,
+            "ssh_key": self.ssh_key,
             "active": self.active,
         }
 
@@ -63,6 +58,7 @@ class Profile:
             username=data["username"],
             directories=data["directories"],
             providers=data["providers"],
+            ssh_key=data.get("ssh_key"),
             active=data["active"],
         )
 
@@ -83,7 +79,6 @@ class ProfileManager:
         
         self.config_dir = config_dir
         self.profiles_file = config_dir / "profiles.json"
-        self.git_config = GitConfig()
         self.ssh_config = SSHConfig()
         self.profiles: dict[str, Profile] = {}
         self._load_profiles()
@@ -101,7 +96,8 @@ class ProfileManager:
                     email=profile_data["email"],
                     username=profile_data["username"],
                     directories=[Path(d) for d in profile_data["directories"]],
-                    providers=[GitProvider(p) for p in profile_data["providers"]],
+                    providers=profile_data["providers"],
+                    ssh_key=profile_data.get("ssh_key"),
                     active=profile_data.get("active", False),
                 )
         except (json.JSONDecodeError, KeyError) as e:
@@ -117,7 +113,8 @@ class ProfileManager:
                     "email": profile.email,
                     "username": profile.username,
                     "directories": [str(d) for d in profile.directories],
-                    "providers": [p.value for p in profile.providers],
+                    "providers": profile.providers,
+                    "ssh_key": profile.ssh_key,
                     "active": profile.active,
                 }
                 for name, profile in self.profiles.items()
@@ -126,102 +123,151 @@ class ProfileManager:
         except OSError as e:
             raise ProfileError(f"Failed to save profiles: {e}")
 
+    def profile_exists(self, name: str) -> bool:
+        """Check if profile exists."""
+        return name in self.profiles
+
+    def has_provider_conflict(self, providers: List[str], email: str) -> tuple[bool, Optional[str]]:
+        """Check if there's a conflict with existing profiles for the given providers and email.
+        
+        Returns:
+            Tuple of (has_conflict: bool, conflicting_profile: Optional[str])
+        """
+        for profile_name, profile in self.profiles.items():
+            # Check if any of the requested providers overlap with existing profile
+            if any(provider in profile.providers for provider in providers):
+                # If providers overlap, check if email is different
+                if profile.email != email:
+                    return True, profile_name
+        return False, None
+
+    def remove_profile(self, name: str) -> None:
+        """Remove a profile."""
+        if name in self.profiles:
+            del self.profiles[name]
+            self._save_profiles()
+
+    def get_profile_dir(self, name: str) -> Path:
+        """Get the directory for a profile."""
+        return self.config_dir / name
+
+    def _save_profile(self, profile: Profile) -> None:
+        """Save a profile."""
+        self.profiles[profile.name] = profile
+        self._save_profiles()
+
     def setup_profile(
         self,
         name: str,
         email: str,
         username: str,
-        directories: list[str],
-        providers: list[str],
-        ssh_key: str | None = None,
+        directories: List[Path],
+        providers: List[str],
+        ssh_key: Optional[str] = None,
+        force: bool = False,
     ) -> Profile:
         """Set up a new Git profile.
-
+        
         Args:
             name: Profile name
             email: Git email
             username: Git username
             directories: List of workspace directories
             providers: List of Git providers
-            ssh_key: Optional path to SSH key
-
+            ssh_key: Optional SSH key path
+            force: If True, overwrite existing profile
+        
         Returns:
-            Created profile
+            Created Profile instance
+        
+        Raises:
+            ProfileError: If profile creation fails
         """
         try:
+            # Check for provider conflicts first
+            has_conflict, conflicting_profile = self.has_provider_conflict(providers, email)
+            if has_conflict and not force:
+                raise ProfileError(
+                    f"Profile '{conflicting_profile}' already exists with different email "
+                    f"for one or more providers: {', '.join(providers)}. "
+                    "Use --force to overwrite or choose different providers."
+                )
+            
+            # Check if profile exists
+            if self.profile_exists(name):
+                if not force:
+                    raise ProfileError(f"Profile '{name}' already exists. Use --force to overwrite.")
+                else:
+                    # Remove existing profile
+                    self.remove_profile(name)
+            
+            # Create profile directory
+            profile_dir = self.get_profile_dir(name)
+            profile_dir.mkdir(parents=True, exist_ok=True)
+
+            # Validate and convert providers
+            validated_providers = []
+            for provider in providers:
+                try:
+                    validated_providers.append(provider)
+                except ValueError as e:
+                    raise ProfileError(f"Invalid Git provider: {provider}") from e
+
             # Create profile
-            if name in self.profiles:
-                raise ProfileError(f"Profile '{name}' already exists")
-
-            # Convert and validate directories
-            try:
-                profile_dirs = []
-                for d in directories:
-                    path = Path(d).expanduser().resolve()
-                    profile_dirs.append(path)
-            except Exception as e:
-                raise ProfileError(f"Invalid directory path: {e}")
-
-            # Validate providers
-            try:
-                validated_providers = []
-                for p in providers:
-                    try:
-                        validated_providers.append(GitProvider(p.lower()))
-                    except ValueError:
-                        valid_providers = ", ".join(p.value for p in GitProvider)
-                        raise ProfileError(f"Invalid Git provider '{p}'. Valid providers are: {valid_providers}")
-            except Exception as e:
-                raise ProfileError(str(e))
-
             profile = Profile(
                 name=name,
                 email=email,
                 username=username,
-                directories=profile_dirs,
+                directories=[d.expanduser().resolve() for d in directories],
                 providers=validated_providers,
+                ssh_key=ssh_key,
+                active=False,
             )
 
             # Create workspace directories
             for directory in profile.directories:
                 try:
                     directory.mkdir(parents=True, exist_ok=True)
-                except Exception as e:
-                    raise ProfileError(f"Failed to create directory {directory}: {e}")
+                except OSError as e:
+                    raise ProfileError(f"Failed to create directory: {e}")
 
-            # Configure Git
-            try:
-                self.git_config.setup(name, email, username)
-            except Exception as e:
-                raise ProfileError(f"Failed to configure Git: {e}")
-
-            # Configure SSH if key is provided
+            # Configure SSH
             if ssh_key:
                 try:
-                    ssh_key_path = Path(ssh_key)
-                    if not ssh_key_path.exists():
-                        raise ProfileError(f"SSH key not found: {ssh_key}")
-                    self.ssh_config.add_key(name, ssh_key_path, [p.value for p in profile.providers])
+                    ssh_config = SSHConfig()
+                    ssh_config.add_key(Path(ssh_key), profile.name)
                 except Exception as e:
                     raise ProfileError(f"Failed to configure SSH: {e}")
 
-            # Save profile
-            self.profiles[name] = profile
-            self._save_profiles()
+            # Configure Git for each workspace
+            from gitplex.git import GitConfig
+            git_config = GitConfig(profile.name)
+            for directory in profile.directories:
+                try:
+                    git_config.setup_config(
+                        email=profile.email,
+                        username=profile.username,
+                        ssh_key_path=Path(ssh_key) if ssh_key else None,
+                        providers=profile.providers,
+                        directory=directory
+                    )
+                except Exception as e:
+                    raise ProfileError(f"Failed to configure Git: {e}")
 
+            # Save profile
+            self._save_profile(profile)
             return profile
 
         except Exception as e:
-            # Ensure the error message is properly formatted
-            error_msg = str(e).replace("[", "\\[").replace("]", "\\]")
+            error_msg = str(e)
             raise ProfileError(f"Failed to setup profile: {error_msg}")
 
     def switch_profile(self, name: str) -> Profile:
         """Switch to a different Git profile.
-
+        
         Args:
             name: Profile name
-
+        
         Returns:
             Activated profile
         """
@@ -232,9 +278,11 @@ class ProfileManager:
             profile = self.profiles[name]
 
             # Update configurations
+            from gitplex.git import GitConfig
+            git_config = GitConfig(profile.name)
             try:
-                self.git_config.update(name, profile.email, profile.username)
-                self.ssh_config.update(name, profile.username, [p.value for p in profile.providers])
+                git_config.update(name, profile.email, profile.username)
+                self.ssh_config.update(name, profile.username, profile.providers)
             except Exception as e:
                 raise ProfileError(f"Failed to update Git/SSH configuration: {e}")
 
@@ -251,13 +299,12 @@ class ProfileManager:
             return profile
 
         except Exception as e:
-            # Ensure the error message is properly formatted
-            error_msg = str(e).replace("[", "\\[").replace("]", "\\]")
+            error_msg = str(e)
             raise ProfileError(f"Failed to switch profile: {error_msg}")
 
     def list_profiles(self) -> list[Profile]:
         """List all profiles.
-
+        
         Returns:
             List of profiles
         """

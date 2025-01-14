@@ -114,98 +114,117 @@ def get_existing_configs() -> dict[str, Path]:
     }
 
 
-def create_backup(
-    config_paths: dict[str, Path],
-    backup_dir: Path | None = None,
-) -> Path:
-    """Create a backup of existing configurations.
-
-    Args:
-        config_paths: Paths to configurations to backup
-        backup_dir: Optional custom backup directory
-
+def backup_configs() -> Path:
+    """Backup Git and SSH configurations.
+    
     Returns:
         Path to backup directory
-
-    Raises:
-        BackupError: If backup fails
     """
-    # Create backup directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_root = backup_dir or get_home_dir() / ".gitplex" / "backups"
-    backup_path = backup_root / f"backup_{timestamp}"
-
     try:
-        backup_path.mkdir(parents=True, exist_ok=True)
+        # Create backup directory with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = Path.home() / ".gitplex" / "backups" / f"backup_{timestamp}"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Backup Git config
+        git_config = Path.home() / ".gitconfig"
+        if git_config.exists():
+            shutil.copy2(git_config, backup_dir / "gitconfig")
+            logger.debug(f"Git config backed up to {backup_dir / 'gitconfig'}")
+        
+        # Backup SSH config and keys
+        ssh_dir = Path.home() / ".ssh"
+        if ssh_dir.exists():
+            ssh_backup_dir = backup_dir / "ssh"
+            ssh_backup_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Backup SSH config
+            ssh_config = ssh_dir / "config"
+            if ssh_config.exists():
+                shutil.copy2(ssh_config, ssh_backup_dir / "config")
+                logger.debug(f"SSH config backed up to {ssh_backup_dir / 'config'}")
+            
+            # Backup SSH keys
+            for key_file in ssh_dir.glob("id_*"):
+                shutil.copy2(key_file, ssh_backup_dir / key_file.name)
+                logger.debug(f"SSH key {key_file.name} backed up to {ssh_backup_dir / key_file.name}")
+            
+            # Backup known_hosts
+            known_hosts = ssh_dir / "known_hosts"
+            if known_hosts.exists():
+                shutil.copy2(known_hosts, ssh_backup_dir / "known_hosts")
+                logger.debug(f"known_hosts backed up to {ssh_backup_dir / 'known_hosts'}")
+        
+        return backup_dir
+        
+    except Exception as e:
+        logger.error(f"Failed to backup configurations: {e}")
+        raise SystemConfigError(f"Failed to backup configurations: {e}")
 
-        # Copy each config
-        for _name, path in config_paths.items():
-            if path.is_file():
-                shutil.copy2(path, backup_path / path.name)
-            elif path.is_dir():
-                shutil.copytree(path, backup_path / path.name)
 
-        # Save backup metadata
-        metadata = {
-            "timestamp": timestamp,
-            "configs": {
-                name: str(path) for name, path in config_paths.items()
-            }
-        }
-        (backup_path / "metadata.json").write_text(json.dumps(metadata, indent=2))
-
-        return backup_path
-
-    except (OSError, shutil.Error) as e:
-        raise BackupError(
-            "Failed to create backup",
-            f"Error: {str(e)}"
-        ) from e
+def restore_configs(backup_path: Path) -> None:
+    """Restore Git and SSH configurations from backup.
+    
+    Args:
+        backup_path: Path to backup directory
+    """
+    try:
+        if not backup_path.exists():
+            raise SystemConfigError(f"Backup directory not found: {backup_path}")
+        
+        # Restore Git config
+        git_backup = backup_path / "gitconfig"
+        if git_backup.exists():
+            shutil.copy2(git_backup, Path.home() / ".gitconfig")
+            logger.debug("Git config restored")
+        
+        # Restore SSH config and keys
+        ssh_backup_dir = backup_path / "ssh"
+        if ssh_backup_dir.exists():
+            ssh_dir = Path.home() / ".ssh"
+            ssh_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Restore SSH config
+            ssh_config_backup = ssh_backup_dir / "config"
+            if ssh_config_backup.exists():
+                shutil.copy2(ssh_config_backup, ssh_dir / "config")
+                logger.debug("SSH config restored")
+            
+            # Restore SSH keys
+            for key_file in ssh_backup_dir.glob("id_*"):
+                shutil.copy2(key_file, ssh_dir / key_file.name)
+                # Ensure correct permissions for private keys
+                if not key_file.name.endswith(".pub"):
+                    (ssh_dir / key_file.name).chmod(0o600)
+                logger.debug(f"SSH key {key_file.name} restored")
+            
+            # Restore known_hosts
+            known_hosts_backup = ssh_backup_dir / "known_hosts"
+            if known_hosts_backup.exists():
+                shutil.copy2(known_hosts_backup, ssh_dir / "known_hosts")
+                logger.debug("known_hosts restored")
+        
+    except Exception as e:
+        logger.error(f"Failed to restore configurations: {e}")
+        raise SystemConfigError(f"Failed to restore configurations: {e}")
 
 
 def check_system_compatibility() -> None:
-    """Check if the current system is compatible with GitPlex."""
-    os_info = get_os_info()
-    logger.debug(f"Starting system compatibility check")
-    logger.debug(f"Detected OS info: {os_info}")
-    
-    # Log OS information
-    logger.debug(f"Running on {os_info['system']} {os_info['release']} ({os_info['machine']})")
-    
-    # Display OS information to user
-    print_info(f"Running on {get_os_display_name()}")
-    
-    # Check Git installation
-    logger.debug("Checking Git installation")
+    """Check system compatibility."""
+    # Check OS
+    os_info = platform.platform()
+    print_info(f"Running on {os_info}")
+
+    # Check Git version
     try:
-        result = subprocess.run(
-            ["git", "--version"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        git_version = result.stdout.strip()
-        logger.debug(f"Git version: {git_version}")
+        git_version = subprocess.check_output(
+            ["git", "--version"], universal_newlines=True
+        ).strip()
         print_info(f"Git version: {git_version}")
-    except subprocess.CalledProcessError:
-        raise SystemConfigError("Git is not installed or not accessible")
-    
-    # Check SSH agent
-    logger.debug("Checking SSH agent")
-    result = subprocess.run(
-        ["ssh-add", "-l"],
-        capture_output=True,
-        text=True
-    )
-    logger.debug(f"SSH agent check returned code {result.returncode}")
-    
-    if result.returncode == 2:
-        raise SystemConfigError(
-            "SSH agent is not running. Please start it with:\n"
-            "eval `ssh-agent -s`"
-        )
-    
-    logger.debug("System compatibility check completed successfully")
+    except subprocess.CalledProcessError as e:
+        raise SystemConfigError("Git is not installed") from e
+    except FileNotFoundError as e:
+        raise SystemConfigError("Git is not installed") from e
 
 
 def _check_ssh_agent_windows() -> None:
@@ -246,38 +265,6 @@ def _check_ssh_agent_unix(os_name: str) -> None:
         logger.error(f"Failed to check SSH agent status on {os_name}", exc_info=True)
         raise SystemConfigError(
             f"Unable to verify SSH agent status on {os_name}"
-        ) from e
-
-
-def restore_backup(backup_path: Path) -> None:
-    """Restore a backup.
-
-    Args:
-        backup_path: Path to backup directory
-
-    Raises:
-        BackupError: If restore fails
-    """
-    try:
-        # Read metadata
-        metadata = json.loads((backup_path / "metadata.json").read_text())
-
-        # Restore each config
-        for name, path_str in metadata["configs"].items():
-            path = Path(path_str)
-            backup_item = backup_path / path.name
-
-            if backup_item.is_file():
-                shutil.copy2(backup_item, path)
-            elif backup_item.is_dir():
-                if path.exists():
-                    shutil.rmtree(path)
-                shutil.copytree(backup_item, path)
-
-    except (OSError, shutil.Error, json.JSONDecodeError) as e:
-        raise BackupError(
-            "Failed to restore backup",
-            f"Error: {str(e)}"
         ) from e
 
 
