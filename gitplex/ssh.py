@@ -60,6 +60,30 @@ class SSHConfig:
         if not self.config_file.exists():
             self.config_file.touch(mode=0o600)
 
+    def add_key(self, name: str, key_path: Path, providers: list[str]) -> None:
+        """Add an existing SSH key to the configuration.
+
+        Args:
+            name: Profile name
+            key_path: Path to the SSH private key
+            providers: List of Git providers
+        """
+        # Validate key exists
+        if not key_path.exists():
+            raise SystemConfigError(f"SSH key not found: {key_path}")
+
+        # Create SSHKey object
+        key = SSHKey(
+            private_key=key_path,
+            public_key=key_path.with_suffix(".pub"),
+            type=KeyType.ED25519,  # Default to ED25519
+            comment=f"{name}@{providers[0]}.com",
+        )
+
+        # Configure for each provider
+        for provider in providers:
+            self.key_manager.configure_for_provider(key, provider, self)
+
     def setup(self, name: str, username: str, providers: list[str]) -> SSHKey:
         """Set up SSH configuration for a new profile.
 
@@ -146,26 +170,35 @@ class SSHKeyManager:
         """Validate that an SSH key is properly formatted and has correct permissions."""
         try:
             # Check that files exist
-            if not key.private_key.exists() or not key.public_key.exists():
+            if not key.private_key.exists():
+                print_warning("Private key file not found")
+                return False
+            if not key.public_key.exists():
+                print_warning("Public key file not found")
                 return False
 
             # Check permissions
-            if key.private_key.stat().st_mode & 0o777 != 0o600:
-                print_warning("Private key has incorrect permissions. Fixing...")
-                key.private_key.chmod(0o600)
+            priv_mode = key.private_key.stat().st_mode & 0o777
+            pub_mode = key.public_key.stat().st_mode & 0o777
 
-            if key.public_key.stat().st_mode & 0o777 != 0o644:
-                print_warning("Public key has incorrect permissions. Fixing...")
-                key.public_key.chmod(0o644)
+            if priv_mode != 0o600:
+                print_warning(f"Private key has incorrect permissions ({oct(priv_mode)})")
+                return False
+
+            if pub_mode != 0o644:
+                print_warning(f"Public key has incorrect permissions ({oct(pub_mode)})")
+                return False
 
             # Validate public key format
             pub_content = key.public_key_content
             parts = pub_content.split()
             if len(parts) < 2:
+                print_warning("Invalid public key format")
                 return False
 
             key_type = parts[0].split("-")[1]  # ssh-ed25519 -> ed25519
             if key_type != key.type.value:
+                print_warning(f"Key type mismatch: expected {key.type.value}, got {key_type}")
                 return False
 
             # Test key with ssh-keygen
@@ -174,9 +207,14 @@ class SSHKeyManager:
                 capture_output=True,
                 text=True,
             )
-            return result.returncode == 0
+            if result.returncode != 0:
+                print_warning("Failed to validate key with ssh-keygen")
+                return False
 
-        except Exception:
+            return True
+
+        except Exception as e:
+            print_warning(f"Error validating SSH key: {e}")
             return False
 
     def get_existing_key(
@@ -187,28 +225,30 @@ class SSHKeyManager:
         pub_path = key_path.with_suffix(".pub")
 
         if key_path.exists() and pub_path.exists():
-            # Try to get the comment from the public key
             try:
+                # Try to get the comment from the public key
                 pub_content = pub_path.read_text().strip()
                 comment = (
                     pub_content.split()[-1] if len(pub_content.split()) > 2 else None
                 )
-            except Exception:
-                comment = None
 
-            key = SSHKey(
-                private_key=key_path,
-                public_key=pub_path,
-                type=key_type,
-                comment=comment,
-            )
+                key = SSHKey(
+                    private_key=key_path,
+                    public_key=pub_path,
+                    type=key_type,
+                    comment=comment,
+                )
 
-            # Validate the key
-            if self.validate_key(key):
-                return key
+                # Validate the key
+                if self.validate_key(key):
+                    # Fix permissions if needed
+                    key_path.chmod(0o600)
+                    pub_path.chmod(0o644)
+                    return key
 
-            print_warning("Found invalid SSH key.")
-            return None
+            except Exception as e:
+                print_warning(f"Error reading SSH key: {e}")
+                return None
 
         return None
 
@@ -359,6 +399,8 @@ class SSHKeyManager:
         # Format the public key for display
         public_key = key.public_key_content
 
+        # Get provider-specific instructions
+        provider = provider.lower()
         instructions = {
             "github": self._format_provider_instructions(
                 "GitHub",
@@ -381,8 +423,19 @@ class SSHKeyManager:
                 fingerprint,
                 public_key,
             ),
+            "azure": self._format_provider_instructions(
+                "Azure DevOps",
+                "https://dev.azure.com/_usersSettings/keys",
+                key,
+                fingerprint,
+                public_key,
+            ),
         }
-        return instructions.get(provider.lower(), "Provider not supported")
+        
+        if provider not in instructions:
+            raise SystemConfigError(f"Provider '{provider}' not supported. Valid providers are: {', '.join(instructions.keys())}")
+        
+        return instructions[provider]
 
     def _format_provider_instructions(
         self,

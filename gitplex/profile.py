@@ -37,7 +37,11 @@ class Profile:
         if isinstance(self.directories[0], str):
             self.directories = [Path(d) for d in self.directories]
         if isinstance(self.providers[0], str):
-            self.providers = [GitProvider(p) for p in self.providers]
+            try:
+                self.providers = [GitProvider(p.lower()) for p in self.providers]
+            except ValueError as e:
+                valid_providers = ", ".join(p.value for p in GitProvider)
+                raise ProfileError(f"Invalid Git provider. Valid providers are: {valid_providers}") from e
 
     def to_dict(self) -> dict:
         """Convert profile to dictionary for serialization."""
@@ -158,12 +162,24 @@ class ProfileManager:
             except Exception as e:
                 raise ProfileError(f"Invalid directory path: {e}")
 
+            # Validate providers
+            try:
+                validated_providers = []
+                for p in providers:
+                    try:
+                        validated_providers.append(GitProvider(p.lower()))
+                    except ValueError:
+                        valid_providers = ", ".join(p.value for p in GitProvider)
+                        raise ProfileError(f"Invalid Git provider '{p}'. Valid providers are: {valid_providers}")
+            except Exception as e:
+                raise ProfileError(str(e))
+
             profile = Profile(
                 name=name,
                 email=email,
                 username=username,
                 directories=profile_dirs,
-                providers=[GitProvider(p) for p in providers],
+                providers=validated_providers,
             )
 
             # Create workspace directories
@@ -173,12 +189,21 @@ class ProfileManager:
                 except Exception as e:
                     raise ProfileError(f"Failed to create directory {directory}: {e}")
 
-            # Configure Git and SSH
+            # Configure Git
             try:
                 self.git_config.setup(name, email, username)
-                self.ssh_config.setup(name, username, providers)
             except Exception as e:
-                raise ProfileError(f"Failed to configure Git/SSH: {e}")
+                raise ProfileError(f"Failed to configure Git: {e}")
+
+            # Configure SSH if key is provided
+            if ssh_key:
+                try:
+                    ssh_key_path = Path(ssh_key)
+                    if not ssh_key_path.exists():
+                        raise ProfileError(f"SSH key not found: {ssh_key}")
+                    self.ssh_config.add_key(name, ssh_key_path, [p.value for p in profile.providers])
+                except Exception as e:
+                    raise ProfileError(f"Failed to configure SSH: {e}")
 
             # Save profile
             self.profiles[name] = profile
