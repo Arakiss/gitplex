@@ -2,6 +2,7 @@
 
 import shutil
 import subprocess
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -9,41 +10,74 @@ from typing import Any
 from .exceptions import SystemConfigError
 from .ui import print_backup_info, print_info
 
+logger = logging.getLogger(__name__)
+
+def check_existing_configs() -> dict[str, bool]:
+    """Check for existing Git and SSH configurations."""
+    logger.debug("Checking for existing configurations")
+    git_config = Path.home() / ".gitconfig"
+    ssh_dir = Path.home() / ".ssh"
+    ssh_config = ssh_dir / "config"
+
+    configs = {
+        "git_config_exists": git_config.exists(),
+        "ssh_config_exists": ssh_config.exists(),
+    }
+    
+    logger.debug(f"Found configurations: {configs}")
+    return configs
+
 
 def create_backup_dir() -> Path:
     """Create backup directory if it doesn't exist."""
+    logger.debug("Creating backup directory")
     backup_dir = Path.home() / ".gitplex" / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
+    logger.debug(f"Backup directory: {backup_dir}")
     return backup_dir
 
 
 def backup_git_config() -> Path:
     """Backup global Git configuration."""
+    logger.debug("Starting Git config backup")
     git_config = Path.home() / ".gitconfig"
     if not git_config.exists():
+        logger.debug("No Git config found to backup")
         return None
 
-    backup_dir = create_backup_dir()
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = backup_dir / f"gitconfig_backup_{timestamp}"
+    try:
+        backup_dir = create_backup_dir()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = backup_dir / f"gitconfig_backup_{timestamp}"
 
-    shutil.copy2(git_config, backup_path)
-    return backup_path
+        shutil.copy2(git_config, backup_path)
+        logger.debug(f"Git config backed up to: {backup_path}")
+        return backup_path
+    except Exception as e:
+        logger.error(f"Failed to backup Git config: {e}", exc_info=True)
+        raise SystemConfigError(f"Failed to backup Git config: {e}")
 
 
 def backup_ssh_config() -> Path:
     """Backup SSH configuration and keys."""
+    logger.debug("Starting SSH config backup")
     ssh_dir = Path.home() / ".ssh"
     if not ssh_dir.exists():
+        logger.debug("No SSH config found to backup")
         return None
 
-    backup_dir = create_backup_dir()
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = backup_dir / f"ssh_backup_{timestamp}"
+    try:
+        backup_dir = create_backup_dir()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = backup_dir / f"ssh_backup_{timestamp}"
 
-    # Create a tarfile with SSH config and keys
-    shutil.make_archive(str(backup_path), "tar", ssh_dir)
-    return Path(f"{backup_path}.tar")
+        # Create a tarfile with SSH config and keys
+        shutil.make_archive(str(backup_path), "tar", ssh_dir)
+        logger.debug(f"SSH config backed up to: {backup_path}.tar")
+        return Path(f"{backup_path}.tar")
+    except Exception as e:
+        logger.error(f"Failed to backup SSH config: {e}", exc_info=True)
+        raise SystemConfigError(f"Failed to backup SSH config: {e}")
 
 
 def restore_git_config(backup_path: Path) -> None:
@@ -73,36 +107,21 @@ def restore_ssh_config(backup_path: Path) -> None:
 
 def backup_configs() -> tuple[Path | None, Path | None]:
     """Backup both Git and SSH configurations."""
-    git_backup = backup_git_config()
-    ssh_backup = backup_ssh_config()
+    logger.debug("Starting backup of all configurations")
+    try:
+        git_backup = backup_git_config()
+        ssh_backup = backup_ssh_config()
 
-    if git_backup:
-        print_backup_info(git_backup, "Git configuration")
-    if ssh_backup:
-        print_backup_info(ssh_backup, "SSH configuration")
+        if git_backup:
+            print_backup_info(git_backup, "Git configuration")
+        if ssh_backup:
+            print_backup_info(ssh_backup, "SSH configuration")
 
-    return git_backup, ssh_backup
-
-
-def check_existing_configs() -> dict[str, Any]:
-    """Check for existing Git and SSH configurations."""
-    git_config = Path.home() / ".gitconfig"
-    ssh_dir = Path.home() / ".ssh"
-    ssh_config = ssh_dir / "config"
-
-    configs = {
-        "git_config_exists": git_config.exists(),
-        "ssh_config_exists": ssh_config.exists(),
-        "ssh_keys": [],
-    }
-
-    if ssh_dir.exists():
-        # Look for SSH keys
-        for key_file in ssh_dir.glob("id_*"):
-            if key_file.suffix not in (".pub", ".old"):
-                configs["ssh_keys"].append(key_file)
-
-    return configs
+        logger.debug("Backup completed successfully")
+        return git_backup, ssh_backup
+    except Exception as e:
+        logger.error(f"Backup failed: {e}", exc_info=True)
+        raise
 
 
 def generate_ssh_key(email: str, key_name: str) -> tuple[Path, Path]:
