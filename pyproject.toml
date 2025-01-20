@@ -28,6 +28,7 @@ dependencies = [
     "cryptography>=42.0.2",
     "pathlib>=1.0.1",
     "typing-extensions>=4.9.0",
+    "gitpython (>=3.1.44,<4.0.0)",
 ]
 
 [project.urls]
