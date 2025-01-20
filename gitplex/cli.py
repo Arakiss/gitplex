@@ -14,8 +14,8 @@ from .backup import (
     restore_git_config,
     restore_ssh_config,
 )
-from .exceptions import ProfileError, SystemConfigError
-from .profile import ProfileManager
+from .exceptions import GitplexError, ProfileError, SystemConfigError
+from .profile import Profile, ProfileManager
 from .system import check_system_compatibility
 from .ui import (
     confirm_action,
@@ -101,13 +101,11 @@ def cli(debug: bool) -> None:
 @click.option("--username", help="Git username")
 @click.option(
     "--directory",
-    multiple=True,
     type=click.Path(path_type=Path),
     help="Workspace directory",
 )
 @click.option(
     "--provider",
-    multiple=True,
     help="Git provider (e.g., github, gitlab, bitbucket)",
 )
 @click.option(
@@ -126,15 +124,37 @@ def setup(
     force: bool = False,
     email: str | None = None,
     username: str | None = None,
-    directory: tuple[Path, ...] | None = None,
-    provider: tuple[str, ...] | None = None,
+    directory: Path | None = None,
+    provider: str | None = None,
     non_interactive: bool = False,
     no_backup: bool = False,
 ) -> None:
     """Set up a new Git profile with Git and SSH configurations."""
     try:
+        # Print welcome message
+        if not non_interactive:
+            print_welcome()
+
         # Check system compatibility
         check_system_compatibility()
+
+        # Collect all profile information first
+        if not name:
+            name = prompt_name()
+
+        # Check if profile exists
+        try:
+            existing_profile = profile_manager.get_profile(name)
+            if not force:
+                if not confirm_action(
+                    f"Profile '{name}' already exists. Do you want to overwrite it?"
+                ):
+                    print_info("Operation cancelled")
+                    return
+                print_warning(f"Overwriting existing profile '{name}'")
+        except ProfileError:
+            # Profile doesn't exist, continue with setup
+            pass
 
         if not no_backup:
             # Check for existing configurations
@@ -155,10 +175,6 @@ def setup(
                         "--backup-path <path>"
                     )
 
-        # Collect all profile information first
-        if not name:
-            name = prompt_name()
-
         if not email:
             email = prompt_email()
 
@@ -169,15 +185,16 @@ def setup(
             directory = prompt_directory()
 
         if not provider:
-            provider = prompt_providers()
+            provider = prompt_providers()[0]  # Take first provider if multiple
 
         # Create new profile
-        profile_manager.create_profile(
+        profile = profile_manager.create_profile(
             name=name,
             email=email,
             username=username,
-            directories=directory,
-            providers=provider,
+            provider=provider,
+            base_dir=directory,
+            force=force,
         )
 
         if not non_interactive:
@@ -198,8 +215,8 @@ def setup(
 @handle_errors
 def switch(name: str) -> None:
     """Switch to a different Git profile."""
-    profile = profile_manager.switch_profile(name)
-    print_success(f"Switched to profile '{profile.name}'")
+    profile_manager.activate_profile(name)
+    print_success(f"Switched to profile '{name}'")
     print_info(
         "\nYour Git configuration has been updated. You can verify it with:\n"
         "git config --global --list"
@@ -221,9 +238,9 @@ def list() -> None:
             "name": p.name,
             "email": p.email,
             "username": p.username,
-            "directories": p.directories,
-            "providers": p.providers,
-            "active": p.active,
+            "directories": [str(p.workspace_dir)],
+            "providers": [p.provider],
+            "active": p.is_active,
         }
         for p in profiles
     ]
@@ -242,30 +259,8 @@ def delete(name: str, force: bool = False) -> None:
         print_info("Operation cancelled")
         return
 
-    profile_manager.remove_profile(name)
+    profile_manager.delete_profile(name, keep_files=False)
     print_success(f"Profile '{name}' deleted successfully")
-
-
-@cli.command()
-@click.argument("name")
-@click.argument("directory", type=click.Path(exists=True, file_okay=False))
-@handle_errors
-def add_directory(name: str, directory: str) -> None:
-    """Add a directory to a profile."""
-    directory_path = Path(directory).resolve()
-    profile_manager.add_directory(name, directory_path)
-    print_success(f"Added directory '{directory_path}' to profile '{name}'")
-
-
-@cli.command()
-@click.argument("name")
-@click.argument("directory", type=click.Path())
-@handle_errors
-def remove_directory(name: str, directory: str) -> None:
-    """Remove a directory from a profile."""
-    directory_path = Path(directory).resolve()
-    profile_manager.remove_directory(name, directory_path)
-    print_success(f"Removed directory '{directory_path}' from profile '{name}'")
 
 
 @cli.command()
@@ -279,7 +274,14 @@ def update(name: str, email: str | None = None, username: str | None = None) -> 
         print_error("Please provide at least one of --email or --username")
         return
 
-    profile_manager.update_profile(name, email=email, username=username)
+    profile = profile_manager.get_profile(name)
+    
+    if email:
+        profile.email = email
+    if username:
+        profile.username = username
+    
+    profile_manager._save_profiles()  # Save changes
     print_success(f"Profile '{name}' updated successfully")
 
 

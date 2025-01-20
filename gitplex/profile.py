@@ -1,22 +1,24 @@
-"""Git profile management."""
+"""Profile management module for GitPlex."""
 
 import json
-from dataclasses import dataclass
-from enum import Enum
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
-from gitplex.exceptions import ProfileError
-from gitplex.ssh import SSHConfig
-from gitplex.system import get_home_dir
+from rich.prompt import Confirm
 
+from .exceptions import GitplexError
+from .ssh import SSHKey, setup_ssh_keys, test_ssh_connection
+from .ui import print_error, print_info, print_success, print_warning
+from .workspace import (
+    GITPLEX_DIR,
+    GitConfig,
+    get_workspace_git_config,
+    setup_workspace,
+    validate_workspace,
+)
 
-class GitProvider(Enum):
-    """Supported Git providers."""
-    GITHUB = "github"
-    GITLAB = "gitlab"
-    BITBUCKET = "bitbucket"
-    AZURE = "azure"
+PROFILES_FILE = GITPLEX_DIR / "profiles.json"
 
 
 @dataclass
@@ -25,15 +27,10 @@ class Profile:
     name: str
     email: str
     username: str
-    directories: list[str]  # Store as strings for serialization
-    providers: list[str]
-    ssh_key: str | None = None
-    active: bool = False
-
-    def __post_init__(self) -> None:
-        """Convert string paths to Path objects."""
-        # Store all paths as strings
-        self.directories = [str(d) for d in self.directories]
+    provider: str
+    workspace_dir: Path
+    ssh_key: SSHKey
+    is_active: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Convert profile to dictionary for serialization."""
@@ -41,158 +38,274 @@ class Profile:
             "name": self.name,
             "email": self.email,
             "username": self.username,
-            "directories": self.directories,
-            "providers": self.providers,
-            "ssh_key": self.ssh_key,
-            "active": self.active,
+            "provider": self.provider,
+            "workspace_dir": str(self.workspace_dir),
+            "ssh_key": {
+                "private_key": str(self.ssh_key.private_key),
+                "public_key": str(self.ssh_key.public_key),
+                "key_type": self.ssh_key.key_type,
+                "comment": self.ssh_key.comment,
+                "provider": self.ssh_key.provider,
+                "profile_name": self.ssh_key.profile_name,
+            },
+            "is_active": self.is_active,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Profile":
         """Create profile from dictionary."""
+        ssh_data = data["ssh_key"]
+        ssh_key = SSHKey(
+            private_key=Path(ssh_data["private_key"]),
+            public_key=Path(ssh_data["public_key"]),
+            key_type=ssh_data["key_type"],
+            comment=ssh_data["comment"],
+            provider=ssh_data["provider"],
+            profile_name=ssh_data["profile_name"],
+        )
+        
         return cls(
             name=data["name"],
             email=data["email"],
             username=data["username"],
-            directories=data["directories"],
-            providers=data["providers"],
-            ssh_key=data.get("ssh_key"),
-            active=data.get("active", False),
+            provider=data["provider"],
+            workspace_dir=Path(data["workspace_dir"]),
+            ssh_key=ssh_key,
+            is_active=data.get("is_active", False),
         )
 
 
 class ProfileManager:
     """Manages Git profiles."""
 
-    def __init__(self, config_dir: Path | None = None) -> None:
-        """Initialize the profile manager.
-
-        Args:
-            config_dir: Optional path to the config directory.
-                       Defaults to ~/.config/gitplex.
-        """
-        if config_dir is None:
-            home_dir = get_home_dir()
-            config_dir = home_dir / ".config" / "gitplex"
-
-        self.config_dir = config_dir
-        self.profiles_file = config_dir / "profiles.json"
-        self.ssh_config = SSHConfig()
+    def __init__(self) -> None:
+        """Initialize profile manager."""
         self.profiles: dict[str, Profile] = {}
         self._load_profiles()
 
     def _load_profiles(self) -> None:
         """Load profiles from disk."""
-        if not self.profiles_file.exists():
+        if not PROFILES_FILE.exists():
             return
-
+        
         try:
-            data = json.loads(self.profiles_file.read_text())
+            data = json.loads(PROFILES_FILE.read_text())
             self.profiles = {
                 name: Profile.from_dict(profile_data)
                 for name, profile_data in data.items()
             }
         except Exception as e:
-            raise ProfileError(f"Failed to load profiles: {e}") from e
+            raise GitplexError(f"Failed to load profiles: {e}") from e
 
     def _save_profiles(self) -> None:
-        """Save profiles to file."""
-        self.config_dir.mkdir(parents=True, exist_ok=True)
+        """Save profiles to disk."""
         try:
-            data = {name: profile.to_dict() for name, profile in self.profiles.items()}
-            self.profiles_file.write_text(json.dumps(data, indent=2))
+            GITPLEX_DIR.mkdir(parents=True, exist_ok=True)
+            data = {
+                name: profile.to_dict()
+                for name, profile in self.profiles.items()
+            }
+            PROFILES_FILE.write_text(json.dumps(data, indent=2))
         except Exception as e:
-            raise ProfileError(f"Failed to save profiles: {e}") from e
-
-    def profile_exists(self, name: str) -> bool:
-        """Check if profile exists."""
-        return name in self.profiles
-
-    def has_provider_conflict(
-        self, providers: list[str], email: str
-    ) -> tuple[bool, str | None]:
-        """Check if there's a conflict with existing profiles.
-
-        Returns:
-            Tuple of (has_conflict: bool, conflicting_profile: str | None)
-        """
-        for name, profile in self.profiles.items():
-            if (
-                profile.email != email
-                and any(p in profile.providers for p in providers)
-            ):
-                return True, name
-        return False, None
-
-    def remove_profile(self, name: str) -> None:
-        """Remove a profile."""
-        if name not in self.profiles:
-            raise ProfileError(f"Profile '{name}' does not exist")
-
-        del self.profiles[name]
-        self._save_profiles()
-
-    def get_profile_dir(self, name: str) -> Path:
-        """Get the directory for a profile."""
-        return self.config_dir / name
-
-    def _save_profile(self, profile: Profile) -> None:
-        """Save a profile."""
-        self.profiles[profile.name] = profile
-        self._save_profiles()
+            raise GitplexError(f"Failed to save profiles: {e}") from e
 
     def create_profile(
         self,
         name: str,
         email: str,
         username: str,
-        directories: list[Path],
-        providers: list[str],
-        ssh_key: str | None = None,
+        provider: str,
+        base_dir: Optional[Path] = None,
+        force: bool = False,
     ) -> Profile:
-        """Create a new Git profile."""
-        if name in self.profiles:
-            raise ProfileError(f"Profile '{name}' already exists")
-
+        """Create a new Git profile.
+        
+        Args:
+            name: Profile name
+            email: Git email
+            username: Git username
+            provider: Git provider
+            base_dir: Base directory for workspaces
+            force: Whether to overwrite existing profile
+        
+        Returns:
+            Created Profile object
+        """
+        # Check if profile exists
+        if name in self.profiles and not force:
+            if not Confirm.ask(
+                f"Profile {name} already exists. Overwrite?",
+                default=False
+            ):
+                raise GitplexError("Profile creation cancelled")
+        
+        # Set up SSH keys
+        ssh_key = setup_ssh_keys(name, provider, email)
+        
+        # Set up workspace
+        workspace_dir = setup_workspace(
+            profile_name=name,
+            email=email,
+            username=username,
+            provider=provider,
+            ssh_key=ssh_key.private_key,
+            base_dir=base_dir,
+        )
+        
+        # Create profile
         profile = Profile(
             name=name,
             email=email,
             username=username,
-            directories=[str(d) for d in directories],
-            providers=providers,
+            provider=provider,
+            workspace_dir=workspace_dir,
             ssh_key=ssh_key,
         )
-
-        # Configure SSH for each provider if key is provided
-        if ssh_key:
-            key_path = Path(ssh_key)
-            self.ssh_config.add_key(name, key_path, providers)
-
-        self._save_profile(profile)
-        return profile
-
-    def switch_profile(self, name: str) -> Profile:
-        """Switch to a different Git profile."""
-        if name not in self.profiles:
-            raise ProfileError(f"Profile '{name}' does not exist")
-
-        # Deactivate current profile
-        for profile in self.profiles.values():
-            profile.active = False
-
-        # Activate new profile
-        profile = self.profiles[name]
-        profile.active = True
+        
+        # Save profile
+        self.profiles[name] = profile
         self._save_profiles()
+        
+        print_success(f"Created profile: {name}")
         return profile
+
+    def get_profile(self, name: str) -> Profile:
+        """Get a profile by name.
+        
+        Args:
+            name: Profile name
+        
+        Returns:
+            Profile object
+        """
+        if name not in self.profiles:
+            raise GitplexError(f"Profile not found: {name}")
+        return self.profiles[name]
 
     def list_profiles(self) -> list[Profile]:
-        """List all profiles."""
+        """Get all profiles.
+        
+        Returns:
+            List of Profile objects
+        """
         return list(self.profiles.values())
 
-    def get_active_profile(self) -> Profile | None:
-        """Get active profile."""
+    def delete_profile(self, name: str, keep_files: bool = False) -> None:
+        """Delete a profile.
+        
+        Args:
+            name: Profile name
+            keep_files: Whether to keep workspace and SSH files
+        """
+        if name not in self.profiles:
+            raise GitplexError(f"Profile not found: {name}")
+        
+        profile = self.profiles[name]
+        
+        if not keep_files:
+            # Remove SSH keys
+            try:
+                profile.ssh_key.private_key.unlink(missing_ok=True)
+                profile.ssh_key.public_key.unlink(missing_ok=True)
+                print_success("Removed SSH keys")
+            except OSError as e:
+                print_warning(f"Failed to remove SSH keys: {e}")
+            
+            # Remove workspace
+            try:
+                if Confirm.ask(
+                    f"Remove workspace directory: {profile.workspace_dir}?",
+                    default=False
+                ):
+                    import shutil
+                    shutil.rmtree(profile.workspace_dir)
+                    print_success("Removed workspace directory")
+            except OSError as e:
+                print_warning(f"Failed to remove workspace: {e}")
+        
+        # Remove from profiles
+        del self.profiles[name]
+        self._save_profiles()
+        
+        print_success(f"Deleted profile: {name}")
+
+    def activate_profile(self, name: str) -> None:
+        """Activate a profile.
+        
+        Args:
+            name: Profile name
+        """
+        if name not in self.profiles:
+            raise GitplexError(f"Profile not found: {name}")
+        
+        # Deactivate current profile
         for profile in self.profiles.values():
-            if profile.active:
+            profile.is_active = False
+        
+        # Activate new profile
+        profile = self.profiles[name]
+        profile.is_active = True
+        
+        # Validate workspace
+        if not validate_workspace(profile.workspace_dir):
+            raise GitplexError(f"Invalid workspace directory: {profile.workspace_dir}")
+        
+        # Test SSH connection
+        if not test_ssh_connection(profile.provider):
+            print_warning("SSH connection test failed")
+        
+        # Save changes
+        self._save_profiles()
+        
+        print_success(f"Activated profile: {name}")
+
+    def get_active_profile(self) -> Optional[Profile]:
+        """Get the currently active profile.
+        
+        Returns:
+            Active Profile object or None
+        """
+        for profile in self.profiles.values():
+            if profile.is_active:
                 return profile
         return None
+
+    def validate_profile(self, name: str) -> bool:
+        """Validate a profile's configuration.
+        
+        Args:
+            name: Profile name
+        
+        Returns:
+            True if valid, False otherwise
+        """
+        if name not in self.profiles:
+            return False
+        
+        profile = self.profiles[name]
+        
+        # Check SSH keys
+        if not profile.ssh_key.exists():
+            print_error("SSH keys not found")
+            return False
+        
+        # Check workspace
+        if not validate_workspace(profile.workspace_dir):
+            print_error("Invalid workspace directory")
+            return False
+        
+        # Check Git config
+        try:
+            config = get_workspace_git_config(profile.workspace_dir)
+            if (
+                config["user.email"] != profile.email
+                or config["user.name"] != profile.username
+                or config["github.user"] != profile.username
+            ):
+                print_error("Git configuration mismatch")
+                return False
+        except GitplexError as e:
+            print_error(f"Git configuration error: {e}")
+            return False
+        
+        return True
