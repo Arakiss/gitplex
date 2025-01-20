@@ -1,4 +1,4 @@
-"""System utilities and backup functionality."""
+"""System compatibility and configuration module."""
 
 import json
 import os
@@ -10,8 +10,8 @@ from pathlib import Path
 import platform
 from typing import Any, Dict
 
-from gitplex.exceptions import BackupError, SystemConfigError
-from gitplex.ui import print_warning, print_info
+from .exceptions import BackupError, SystemConfigError
+from .ui_common import print_error, print_info, print_success, print_warning
 
 logger = logging.getLogger(__name__)
 
@@ -210,21 +210,54 @@ def restore_configs(backup_path: Path) -> None:
 
 
 def check_system_compatibility() -> None:
-    """Check system compatibility."""
-    # Check OS
-    os_info = platform.platform()
-    print_info(f"Running on {os_info}")
-
-    # Check Git version
+    """Check system compatibility and requirements."""
     try:
-        git_version = subprocess.check_output(
-            ["git", "--version"], universal_newlines=True
-        ).strip()
-        print_info(f"Git version: {git_version}")
-    except subprocess.CalledProcessError as e:
-        raise SystemConfigError("Git is not installed") from e
-    except FileNotFoundError as e:
-        raise SystemConfigError("Git is not installed") from e
+        # Check Git installation
+        try:
+            subprocess.run(
+                ["git", "--version"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            print_success("Git is installed")
+        except subprocess.CalledProcessError:
+            raise SystemConfigError("Git is not installed")
+        
+        # Check SSH installation
+        try:
+            subprocess.run(
+                ["ssh", "-V"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            print_success("SSH is installed")
+        except subprocess.CalledProcessError:
+            raise SystemConfigError("SSH is not installed")
+        
+        # Check SSH agent
+        if not os.environ.get("SSH_AUTH_SOCK"):
+            print_warning("SSH agent is not running")
+        else:
+            print_success("SSH agent is running")
+        
+        # Check write permissions
+        home = Path.home()
+        gitconfig = home / ".gitconfig"
+        ssh_dir = home / ".ssh"
+        
+        # Check .gitconfig
+        if gitconfig.exists() and not os.access(gitconfig, os.W_OK):
+            raise SystemConfigError("No write permission for .gitconfig")
+        
+        # Check .ssh directory
+        if ssh_dir.exists() and not os.access(ssh_dir, os.W_OK):
+            raise SystemConfigError("No write permission for .ssh directory")
+        
+        print_success("System compatibility check passed")
+    except Exception as e:
+        raise SystemConfigError(f"System compatibility check failed: {e}") from e
 
 
 def _check_ssh_agent_windows() -> None:
@@ -299,3 +332,18 @@ def get_os_display_name() -> str:
         return f"Windows {os_info['release']}"
     else:
         return f"Unknown OS ({system} {os_info['release']})"
+
+def get_system_info() -> dict[str, str]:
+    """Get system information.
+    
+    Returns:
+        Dictionary containing system information
+    """
+    return {
+        "os": platform.system(),
+        "release": platform.release(),
+        "version": platform.version(),
+        "machine": platform.machine(),
+        "processor": platform.processor(),
+        "python": platform.python_version(),
+    }

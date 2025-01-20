@@ -23,68 +23,30 @@ theme = Theme(
 console = Console(theme=theme)
 
 
-def print_error(message: str, details: str | None = None) -> None:
-    """Print an error message."""
-    # Create plain text without any markup
-    error_text = f"❌ {message}"
-    if details:
-        error_text += f"\n\n{details}"
-
-    # Create panel with raw text
-    panel = Panel.fit(
-        error_text,
-        style="error",
-        border_style="red",
-    )
-    # Print without interpreting markup
-    console.print(panel, markup=False)
+def print_error(message: str) -> None:
+    """Print error message."""
+    console.print(f"[error]Error:[/error] {message}")
 
 
 def print_warning(message: str) -> None:
-    """Print a warning message."""
-    panel = Panel.fit(
-        f"⚠️  {message}",
-        style="warning",
-        border_style="yellow",
-    )
-    console.print(panel)
+    """Print warning message."""
+    console.print(f"[warning]Warning:[/warning] {message}")
+
+
+def print_info(message: str) -> None:
+    """Print info message."""
+    console.print(f"[info]Info:[/info] {message}")
 
 
 def print_success(message: str) -> None:
-    """Print a success message."""
-    panel = Panel.fit(
-        f"✅ {message}",
-        style="success",
-        border_style="green",
-    )
-    console.print(panel)
+    """Print success message."""
+    console.print(f"[success]Success:[/success] {message}")
 
 
-def print_info(message: str, no_panel: bool = False) -> None:
-    """Print an informational message.
-    
-    Args:
-        message: The message to print
-        no_panel: If True, prints the message without a panel (useful for SSH keys)
-    """
-    if no_panel:
-        console.print(message)
-    else:
-        panel = Panel.fit(
-            f"ℹ️  {message}",
-            style="info",
-            border_style="blue",
-        )
-        console.print(panel)
-
-
-def confirm_action(message: str, default: bool = True) -> bool:
-    """Ask for user confirmation."""
+def confirm_action(prompt: str, default: bool = True) -> bool:
+    """Confirm an action with the user."""
     try:
-        return Confirm.ask(
-            f"[highlight]{message}[/]",
-            default=default,
-            show_default=True,
-        )
+        return Confirm.ask(prompt, default=default)
     except KeyboardInterrupt:
-        return False
+        from .exceptions import GitplexError
+        raise GitplexError("Operation cancelled by user") from None
