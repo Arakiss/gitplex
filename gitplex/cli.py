@@ -1,6 +1,5 @@
 """Command-line interface."""
 
-import sys
 import logging
 from collections.abc import Callable
 from functools import wraps
@@ -17,20 +16,13 @@ from .backup import (
 )
 from .exceptions import ProfileError, SystemConfigError
 from .profile import ProfileManager
-from .ssh import KeyType, SSHKeyManager, SSHConfig
-from .system import check_system_compatibility, get_home_dir
+from .system import check_system_compatibility
 from .ui import (
     confirm_action,
-    confirm_git_setup,
-    get_user_input,
     print_error,
-    print_git_config_preview,
-    print_git_setup_summary,
     print_info,
-    print_profile_info,
     print_profile_table,
     print_setup_steps,
-    print_ssh_key,
     print_success,
     print_warning,
     print_welcome,
@@ -44,21 +36,20 @@ from .ui import (
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
 F = TypeVar('F', bound=Callable[..., Any])
 
+# Initialize profile manager
+profile_manager = ProfileManager()
 
 class GitplexError(click.ClickException):
     """Base exception for Gitplex CLI errors."""
     def show(self, file: Any = None) -> None:
         """Show error message."""
-        # Escape error message for display
-        escaped_message = str(self.message).replace("[", "\\[").replace("]", "\\]")
-        print_error(escaped_message)
-
+        print_error(self.message)
 
 def handle_errors(f: F) -> F:
     """Decorator to handle errors in CLI commands."""
@@ -105,19 +96,19 @@ def cli(debug: bool) -> None:
 
 @cli.command()
 @click.option("--name", help="Profile name")
-@click.option("--force", is_flag=True, help="Force overwrite if profile exists")
-@click.option("--email", help="Git email")
+@click.option("--force", is_flag=True, help="Force overwrite existing profile")
+@click.option("--email", help="Git email address")
 @click.option("--username", help="Git username")
 @click.option(
     "--directory",
-    help="Workspace directories",
     multiple=True,
-    type=click.Path(exists=False, file_okay=False, path_type=Path),
+    type=click.Path(path_type=Path),
+    help="Workspace directory",
 )
 @click.option(
     "--provider",
-    help="Git providers",
     multiple=True,
+    help="Git provider (e.g., github, gitlab, bitbucket)",
 )
 @click.option(
     "--non-interactive",
@@ -142,93 +133,64 @@ def setup(
 ) -> None:
     """Set up a new Git profile with Git and SSH configurations."""
     try:
-        logger.debug("Starting setup command")
-        print_welcome()
-        
-        # Show important warning
-        print_warning(
-            "⚠️  IMPORTANT: This tool modifies your Git and SSH configurations. "
-            "While it creates backups by default, you should use it at your own risk. "
-            "Make sure you understand the changes it will make to your system."
-        )
-        if not confirm_action("Do you understand and wish to continue?", default=False):
-            print_info("Setup cancelled.")
-            return
-            
-        # Show setup steps
-        print_setup_steps()
-        
-        # System compatibility check
-        logger.debug("Running system compatibility check")
+        # Check system compatibility
         check_system_compatibility()
-        
-        # Check and backup existing configurations
+
         if not no_backup:
-            configs = check_existing_configs()
-            if configs["git_config_exists"] or configs["ssh_config_exists"]:
-                print_info("Found existing Git/SSH configurations.")
-                if confirm_action("Would you like to back them up before proceeding?", default=True):
-                    backup_path = backup_configs()
+            # Check for existing configurations
+            existing_configs = check_existing_configs()
+            if existing_configs and not force:
+                if not confirm_action(
+                    "Existing Git/SSH configurations found. Would you like to back them up?"
+                ):
+                    print_info("Operation cancelled")
+                    return
+
+                # Backup existing configurations
+                backup_path = backup_configs()
+                if backup_path:
                     print_success(f"Configurations backed up to: {backup_path}")
-                    print_info("You can restore them later with: gitplex restore --backup-path <path>")
-        
-        # Initialize managers
-        profile_manager = ProfileManager()
-        
+                    print_info(
+                        "You can restore them later with: gitplex restore "
+                        "--backup-path <path>"
+                    )
+
         # Collect all profile information first
         if not name:
             name = prompt_name()
-        
+
         if not email:
             email = prompt_email()
-        
+
         if not username:
             username = prompt_username()
-        
-        if not provider:
-            provider = tuple(prompt_providers())
-        
+
         if not directory:
-            default_dir = Path.home() / name.lower()
-            workspace_dir = prompt_directory(default_dir)
-            directory = (Path(workspace_dir),)
-        
-        # Now check for conflicts
-        has_conflict, conflicting_profile = profile_manager.has_provider_conflict(list(provider), email)
-        if has_conflict:
-            print_warning(
-                f"Profile '{conflicting_profile}' already exists with different email "
-                f"for providers: {', '.join(provider)}."
-            )
-            if not confirm_action("Would you like to continue and create a new profile anyway?", default=False):
-                print_info("Setup cancelled.")
-                return
-            force = True
-        elif profile_manager.profile_exists(name):
-            print_warning(f"Profile '{name}' already exists.")
-            if not confirm_action("Would you like to overwrite it?", default=False):
-                print_info("Setup cancelled. Please try again with a different profile name.")
-                return
-            force = True
-        
-        # Create profile
+            directory = prompt_directory()
+
+        if not provider:
+            provider = prompt_providers()
+
+        # Create new profile
         profile_manager.create_profile(
             name=name,
             email=email,
             username=username,
-            providers=list(provider),
-            directories=[str(d) for d in directory],
-            force=force
+            directories=directory,
+            providers=provider,
         )
-        
-        print_success(f"Profile '{name}' created successfully!")
-        print("\n[dim]Need help? Run [cyan]gitplex --help[/cyan] for more information[/dim]")
-        return
-        
-    except Exception as e:
-        logger.error(f"Setup failed: {e}", exc_info=True)
-        print_error(f"Setup failed: {e}")
-        raise
+
+        if not non_interactive:
+            print_setup_steps()
+
+        print_success(f"Profile '{name}' created successfully")
+        print_info(
+            f"Profile '{name}' is now active. Your Git and SSH configurations "
+            "have been updated."
+        )
+
+    except (ProfileError, SystemConfigError) as e:
+        raise GitplexError(str(e))
 
 
 @cli.command()
@@ -236,7 +198,6 @@ def setup(
 @handle_errors
 def switch(name: str) -> None:
     """Switch to a different Git profile."""
-    profile_manager = ProfileManager()
     profile = profile_manager.switch_profile(name)
     print_success(f"Switched to profile '{profile.name}'")
     print_info(
@@ -249,7 +210,6 @@ def switch(name: str) -> None:
 @handle_errors
 def list() -> None:
     """List all Git profiles."""
-    profile_manager = ProfileManager()
     profiles = profile_manager.list_profiles()
 
     if not profiles:
@@ -272,45 +232,40 @@ def list() -> None:
 
 @cli.command()
 @click.argument("name")
-@click.option("--force", is_flag=True, help="Force deletion without confirmation")
+@click.option("--force", is_flag=True, help="Force delete without confirmation")
 @handle_errors
-def delete(name: str, force: bool) -> None:
+def delete(name: str, force: bool = False) -> None:
     """Delete a Git profile."""
     if not force and not confirm_action(
-        f"Are you sure you want to delete profile '{name}'? This cannot be undone."
+        f"Are you sure you want to delete profile '{name}'?"
     ):
         print_info("Operation cancelled")
         return
 
-    profile_manager = ProfileManager()
-    profile_manager.delete_profile(name)
+    profile_manager.remove_profile(name)
     print_success(f"Profile '{name}' deleted successfully")
 
 
 @cli.command()
 @click.argument("name")
-@click.argument("directory", type=click.Path(resolve_path=True))
+@click.argument("directory", type=click.Path(exists=True, file_okay=False))
 @handle_errors
 def add_directory(name: str, directory: str) -> None:
     """Add a directory to a profile."""
-    dir_path = ensure_directory(directory)
-    profile_manager = ProfileManager()
-    profile = profile_manager.add_directory(name, dir_path)
-    print_success(f"Added directory '{dir_path}' to profile '{profile.name}'")
-    print_info(
-        "\nGit configuration will be automatically used when working in this directory"
-    )
+    directory_path = Path(directory).resolve()
+    profile_manager.add_directory(name, directory_path)
+    print_success(f"Added directory '{directory_path}' to profile '{name}'")
 
 
 @cli.command()
 @click.argument("name")
-@click.argument("directory", type=click.Path(resolve_path=True))
+@click.argument("directory", type=click.Path())
 @handle_errors
 def remove_directory(name: str, directory: str) -> None:
     """Remove a directory from a profile."""
-    profile_manager = ProfileManager()
-    profile = profile_manager.remove_directory(name, directory)
-    print_success(f"Removed directory '{directory}' from profile '{profile.name}'")
+    directory_path = Path(directory).resolve()
+    profile_manager.remove_directory(name, directory_path)
+    print_success(f"Removed directory '{directory_path}' from profile '{name}'")
 
 
 @cli.command()
@@ -318,26 +273,14 @@ def remove_directory(name: str, directory: str) -> None:
 @click.option("--email", help="New Git email")
 @click.option("--username", help="New Git username")
 @handle_errors
-def update(name: str, email: str | None, username: str | None) -> None:
+def update(name: str, email: str | None = None, username: str | None = None) -> None:
     """Update a Git profile."""
     if not email and not username:
-        print_error("No changes specified. Use --email or --username")
+        print_error("Please provide at least one of --email or --username")
         return
 
-    profile_manager = ProfileManager()
-    profile = profile_manager.get_profile(name)
-
-    if email:
-        profile.email = email
-    if username:
-        profile.username = username
-
-    profile_manager.save_profile(profile)
+    profile_manager.update_profile(name, email=email, username=username)
     print_success(f"Profile '{name}' updated successfully")
-    print_info(
-        "\nChanges will take effect next time you switch to this profile:\n"
-        f"gitplex switch {name}"
-    )
 
 
 @cli.command()

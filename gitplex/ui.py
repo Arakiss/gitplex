@@ -1,24 +1,26 @@
-"""Terminal UI components and utilities."""
+"""UI module for GitPlex."""
 
+import os
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Optional, Dict, List
 
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-from rich import box
-from rich.markdown import Markdown
+import git
+from rich.box import box
 from rich.columns import Columns
-from rich.prompt import Prompt
-from rich.align import Align
+from rich.console import Console
+from rich.live import Live
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.prompt import Confirm, Prompt
+from rich.table import Table
 from rich.text import Text
-from rich.style import Style
 
 from .ascii_art import BANNER
-from .version import __version__
-from .exceptions import SystemConfigError
+from .exceptions import GitplexError
 from .ssh import SSHKey
+from .version import __version__
 
 console = Console()
 
@@ -168,11 +170,11 @@ def get_git_version() -> str:
             ["git", "--version"],
             capture_output=True,
             text=True,
-            check=True
+            check=True,
         )
         return result.stdout.strip()
-    except:
-        return "Git not found"
+    except subprocess.CalledProcessError as e:
+        raise GitplexError("Failed to get Git version") from e
 
 
 def suggest_profile_name(email: str, provider: str) -> str:
@@ -193,7 +195,7 @@ def suggest_profile_name(email: str, provider: str) -> str:
     return suggestions[0]
 
 
-def prompt_name(email: Optional[str] = None, provider: Optional[str] = None) -> str:
+def prompt_name(email: str | None = None, provider: str | None = None) -> str:
     """Smart profile name prompt with suggestions."""
     # Create examples panel
     examples = [
@@ -255,24 +257,27 @@ def prompt_name(email: Optional[str] = None, provider: Optional[str] = None) -> 
         return name
 
 
-def detect_git_providers() -> List[str]:
+def detect_git_providers() -> list[str]:
     """Detect potential Git providers from existing remotes."""
     try:
-        import git
+        repo = git.Repo(os.getcwd())
+        remotes = repo.remotes
         providers = set()
-        for repo in git.Repo(".").remotes:
-            url = repo.url
-            if "github" in url:
+        
+        for remote in remotes:
+            url = remote.url
+            if "github.com" in url:
                 providers.add("github")
-            elif "gitlab" in url:
+            elif "gitlab.com" in url:
                 providers.add("gitlab")
-            elif "bitbucket" in url:
+            elif "bitbucket.org" in url:
                 providers.add("bitbucket")
             elif "dev.azure.com" in url:
                 providers.add("azure")
-        return list(providers)
-    except:
-        return []
+        
+        return sorted(list(providers))
+    except (git.exc.InvalidGitRepositoryError, git.exc.NoSuchPathError) as e:
+        raise GitplexError("Not a valid Git repository") from e
 
 
 def prompt_providers() -> list[str]:
@@ -324,267 +329,216 @@ def prompt_providers() -> list[str]:
 
 def get_user_input(
     prompt: str,
-    default: Optional[str] = None,
+    default: str | None = None,
     required: bool = False,
-    completer: Optional[callable] = None,
 ) -> str:
-    """Enhanced user input with auto-completion and validation."""
-    prompt_style = "bold cyan"
-    default_style = "italic yellow"
-    
-    prompt_text = Text()
-    prompt_text.append(f"❯ {prompt}", style=prompt_style)
-    
-    if default:
-        prompt_text.append(f" (default: {default})", style=default_style)
-    
-    console.print(prompt_text)
-    
-    # Show completion hints if available
-    if completer:
-        completions = completer()
-        if completions:
-            console.print(
-                Text("💡 Tab to cycle through: ", style="dim") + 
-                Text(", ".join(completions), style="blue dim")
-            )
-    
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        transient=True,
-    ) as progress:
-        while True:
-            progress.add_task("", description="")
-            value = input("  ").strip()
-            
-            if not value:
-                if default:
-                    return default
-                elif required:
-                    console.print("  ⚠️  This field is required", style="red")
-                    continue
-                else:
-                    return ""
-            
+    """Get user input with validation."""
+    while True:
+        try:
+            value = Prompt.ask(prompt, default=default or "")
+            if required and not value:
+                console.print("  ⚠️  This field is required", style="red")
+                continue
             return value
+        except KeyboardInterrupt:
+            raise GitplexError("Operation cancelled by user") from None
 
 
-def confirm_action(message: str, default: bool = True) -> bool:
-    """Enhanced action confirmation with visual feedback."""
-    style = "bold cyan"
-    prompt = Text()
-    prompt.append(f"❯ {message} ", style=style)
-    prompt.append("[y/n]", style="italic yellow")
-    if default:
-        prompt.append(" (y)", style="dim")
-    else:
-        prompt.append(" (n)", style="dim")
+def confirm_action(prompt: str, default: bool = True) -> bool:
+    """Confirm an action with the user."""
+    try:
+        return Confirm.ask(prompt, default=default)
+    except KeyboardInterrupt:
+        raise GitplexError("Operation cancelled by user") from None
+
+
+def prompt_directory(
+    message: str = "Enter directory path",
+    default: str | None = None,
+    create: bool = False,
+) -> Path:
+    """Prompt user for a directory path."""
+    while True:
+        path_str = get_user_input(message, default=default)
+        path = Path(path_str).expanduser().resolve()
+
+        if path.exists() and path.is_dir():
+            return path
+        elif create:
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+                return path
+            except OSError as e:
+                console.print(f"[red]Error creating directory: {e}[/red]")
+        else:
+            console.print("[red]Directory does not exist.[/red]")
+
+
+def print_git_config_info() -> None:
+    """Print Git configuration information."""
+    console.print("Git Configuration:", style="bold")
+    console.print("• Global: ~/.gitconfig")
+    console.print("• Local: .git/config")
+    console.print("• System: /usr/local/etc/gitconfig")
+    console.print()
     
-    console.print(prompt)
-    
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        transient=True,
-    ) as progress:
-        while True:
-            progress.add_task("", description="")
-            choice = input("  ").lower().strip()
-            if not choice:
-                return default
-            if choice in ["y", "yes"]:
-                return True
-            if choice in ["n", "no"]:
-                return False
-            console.print("  ⚠️  Please answer 'y' or 'n'", style="red")
+    console.print("To verify your configuration, run:", style="bold")
+    console.print("  git config --list --show-origin")
+    console.print()
 
 
-def print_profile_table(profiles: list[dict[str, Any]]) -> None:
-    """Print a table of profiles."""
-    table = Table(
-        title="[title]Git Profiles[/]",
-        show_header=True,
-        header_style="bold cyan",
+def print_git_config_preview(
+    profile_name: str,
+    email: str,
+    username: str,
+    workspace_dirs: list[Path],
+) -> None:
+    """Print Git configuration preview."""
+    panel = Panel(
+        Text.assemble(
+            Text("Git Configuration Preview", style="bold"),
+            "\n\n",
+            Text("Profile: ", style="dim"),
+            Text(profile_name, style="cyan"),
+            "\n",
+            Text("Email: ", style="dim"),
+            Text(email, style="cyan"),
+            "\n",
+            Text("Username: ", style="dim"),
+            Text(username, style="cyan"),
+            "\n",
+            Text("Workspace Directories:", style="dim"),
+            *[Text(f"\n  • {d}", style="blue") for d in workspace_dirs],
+        ),
+        title="[bold]Git Config[/bold]",
         border_style="blue",
     )
-
-    # Add columns
-    table.add_column("Name", style="cyan")
-    table.add_column("Email", style="green")
-    table.add_column("Username", style="yellow")
-    table.add_column("Directories", style="blue")
-    table.add_column("Providers", style="magenta")
-    table.add_column("Active", style="red")
-
-    # Add rows
-    for profile in profiles:
-        table.add_row(
-            profile["name"],
-            profile["email"],
-            profile["username"],
-            "\n".join(profile["directories"]),
-            "\n".join(profile["providers"]),
-            "✓" if profile["active"] else "",
-        )
-
-    console.print("\n")
-    console.print(table)
-    console.print("\n")
+    console.print(panel)
+    console.print()
 
 
-def print_backup_info(backup_path: Path, config_type: str = "configuration") -> None:
-    """Print information about backup creation."""
-    # Create a clean panel for backup information
-    backup_info = [
-        "[green]✓[/green] Backup created successfully",
-        "",
-        "[bold]Location:[/bold]",
-        f"  {backup_path}",
-        "",
-        "[bold]Restore command:[/bold]",
-        f"  gitplex restore {backup_path} --type {config_type.split()[0].lower()}"
-    ]
-    
-    console.print(Panel(
-        "\n".join(backup_info),
-        title=f"[bold]{config_type} Backup[/bold]",
-        border_style="green"
-    ))
-    console.print()  # Add spacing
-
-
-def suggest_workspace_directory(profile_name: str) -> str:
-    """Suggest a workspace directory based on profile name."""
-    home = Path.home()
-    suggestions = [
-        home / "Projects" / profile_name,
-        home / "Code" / profile_name,
-        home / "Workspace" / profile_name,
-        home / profile_name,
-    ]
-
-    # Try to find or create a suitable directory
-    for path in suggestions:
-        if path.exists() and path.is_dir():
-            return str(path)
-        elif not path.exists() and path.parent.exists():
-            return str(path)
-
-    # Default to home directory with profile name
-    return str(home / profile_name)
-
-
-def prompt_directory(default_path: str | Path | None = None) -> str:
-    """Smart directory prompt with path validation."""
-    if not default_path:
-        default_path = Path.home() / "workspace"
-    elif isinstance(default_path, str):
-        default_path = Path(default_path)
-    
+def print_git_setup_summary(profile_name: str, workspace_dirs: list[Path]) -> None:
+    """Print a summary of Git setup."""
     panel = Panel(
-        Align.center(
-            Text.assemble(
-                Text("Choose a workspace directory for this profile", style="bold cyan"),
-                "\n\n",
-                Text("This directory will:", style="dim"),
-                "\n",
-                Text("• Store your Git repositories", style="green"),
-                "\n",
-                Text("• Use profile-specific Git config", style="green"),
-                "\n",
-                Text("• Help organize your work", style="green"),
-                "\n\n",
-                Text(f"Default: {default_path}", style="blue"),
-            )
+        Text.assemble(
+            Text("Git Setup Complete", style="bold green"),
+            "\n\n",
+            Text("Profile: ", style="dim"),
+            Text(profile_name, style="cyan"),
+            "\n",
+            Text("Workspace Directories:", style="dim"),
+            *[Text(f"\n  • {d}", style="blue") for d in workspace_dirs],
         ),
-        title="Workspace Directory",
-        box=box.ROUNDED,
+        title="[bold]Setup Summary[/bold]",
+        border_style="green",
     )
     console.print(panel)
-    
-    while True:
-        dir_str = get_user_input(
-            "Enter workspace directory",
-            default=str(default_path),
-            required=True
+    console.print()
+
+
+def print_banner() -> None:
+    """Print the application banner."""
+    console.print(
+        Panel(
+            Text(BANNER, style="bold blue"),
+            subtitle=f"[dim]v{__version__}[/dim]",
+            border_style="blue",
         )
-        
-        try:
-            path = Path(dir_str).expanduser().resolve()
-            # Create directory if it doesn't exist
-            if not path.exists():
-                if confirm_action(f"Directory {path} doesn't exist. Create it?", default=True):
-                    path.mkdir(parents=True, exist_ok=True)
-                else:
-                    continue
-            return str(path)
-        except Exception as e:
-            console.print(f"  ⚠️  Invalid path: {e}", style="red")
+    )
+    console.print()
 
 
-def print_git_config_preview(profile_name: str, email: str, username: str, workspace_dir: Path) -> None:
-    """Print preview of Git configuration that will be created."""
-    config_preview = f"""
-[user]
-    email = {email}
-    name = {username}
-
-[core]
-    sshCommand = "ssh -i ~/.ssh/id_{profile_name}_ed25519"
-
-[init]
-    defaultBranch = main
-"""
-    
+def print_ssh_key_info(key: SSHKey) -> None:
+    """Print SSH key information."""
     panel = Panel(
-        f"Git Configuration Preview for {workspace_dir}:\n{config_preview}",
-        title="📝 Git Config",
-        border_style="blue"
+        Text.assemble(
+            Text("SSH Key Generated", style="bold green"),
+            "\n\n",
+            Text("Public Key: ", style="dim"),
+            Text(str(key.public_key), style="cyan"),
+            "\n",
+            Text("Private Key: ", style="dim"),
+            Text(str(key.private_key), style="blue"),
+        ),
+        title="[bold]SSH Key Info[/bold]",
+        border_style="green",
     )
     console.print(panel)
-
-
-def print_git_setup_summary(profile_name: str, workspace_dirs: List[Path]) -> None:
-    """Print summary of Git configuration setup."""
-    console.print("\n=== Git Configuration Summary ===\n", style="bold blue")
-    
-    # Show global config changes
-    console.print("🔧 Global Git Configuration:", style="bold")
-    console.print(f"Location: ~/.gitconfig")
-    console.print("Added workspace-specific configurations:")
-    
-    for workspace in workspace_dirs:
-        console.print(f"  • {workspace}: Uses profile '{profile_name}' settings")
-    
-    console.print("\n🔍 To verify your configuration, run:", style="bold")
-    console.print("  git config --list --show-origin")
+    console.print()
 
 
 def confirm_git_setup() -> bool:
-    """Confirm Git configuration setup with user."""
-    return confirm_action(
-        "Would you like to proceed with Git configuration setup?",
-        default=True
+    """Confirm Git setup with the user."""
+    panel = Panel(
+        Text.assemble(
+            Text("This will:", style="bold"),
+            "\n",
+            Text("• Configure Git for the selected directories", style="green"),
+            "\n",
+            Text("• Generate SSH keys if needed", style="green"),
+            "\n",
+            Text("• Set up Git provider access", style="green"),
+        ),
+        title="[bold]Git Setup[/bold]",
+        border_style="blue",
     )
+    console.print(panel)
+    return confirm_action("Proceed with Git setup?")
 
 
-def print_profile_info(profile: dict[str, Any]) -> None:
-    """Print detailed profile information."""
-    table = Table(title=f"Profile: {profile['name']}")
+def prompt_email() -> str:
+    """Prompt for Git email."""
+    return get_user_input("Enter Git email", required=True)
+
+
+def prompt_username() -> str:
+    """Prompt for Git username."""
+    return get_user_input("Enter Git username", required=True)
+
+
+def print_info(message: str) -> None:
+    """Print an info message."""
+    console.print(f"ℹ️  {message}", style="blue")
+
+
+def print_warning(message: str) -> None:
+    """Print a warning message."""
+    console.print(f"⚠️  {message}", style="yellow")
+
+
+def print_error(message: str, details: str | None = None) -> None:
+    """Print an error message with optional details."""
+    if details:
+        console.print(
+            Panel(
+                f"{message}\n\n{details}",
+                title="[red]Error[/red]",
+                border_style="red",
+            )
+        )
+    else:
+        console.print(f"❌ {message}", style="red")
+
+
+def print_profile_info(profile: dict[str, str]) -> None:
+    """Print profile information."""
+    table = Table(
+        title="Profile Information",
+        show_header=True,
+        header_style="bold magenta",
+        box=box.ROUNDED,
+    )
     
-    table.add_column("Setting", style="cyan")
+    table.add_column("Setting", style="cyan", no_wrap=True)
     table.add_column("Value", style="green")
     
-    table.add_row("Email", profile["email"])
-    table.add_row("Username", profile["username"])
-    table.add_row("Workspaces", "\n".join(str(d) for d in profile["directories"]))
-    table.add_row("Providers", "\n".join(profile["providers"]))
-    table.add_row("SSH Key", profile["ssh_key"] or "None")
-    table.add_row("Status", "Active" if profile["active"] else "Inactive")
+    for key, value in profile.items():
+        if key != "name":  # Name is shown in the title
+            table.add_row(key.replace("_", " ").title(), str(value))
     
     console.print(table)
-    
+    console.print()
+
     # Show Git config locations
     console.print("\n🔧 Git Configurations:", style="bold")
     for workspace in profile["directories"]:
@@ -603,168 +557,3 @@ def print_ssh_key(key: SSHKey, provider: str | None = None) -> None:
     )
     if result.returncode == 0:
         console.print(f"Key fingerprint: {result.stdout.strip()}", style="info")
-
-
-def confirm_backup() -> bool:
-    """Confirm backup creation."""
-    return confirm_action(
-        "Existing Git configurations found. Would you like to back them up?",
-    )
-
-
-def prompt_email() -> str:
-    """Smart email prompt with validation."""
-    panel = Panel(
-        Align.center(
-            Text.assemble(
-                Text("Enter the email address for this Git profile", style="bold cyan"),
-                "\n\n",
-                Text("This will be used in your Git commits and:", style="dim"),
-                "\n",
-                Text("• Signing your commits", style="green"),
-                "\n",
-                Text("• Identifying you to Git providers", style="green"),
-                "\n",
-                Text("• Suggesting profile names", style="green"),
-            )
-        ),
-        title="Git Email",
-        box=box.ROUNDED,
-    )
-    console.print(panel)
-    
-    while True:
-        email = get_user_input("Enter Git email", required=True)
-        if "@" not in email or "." not in email:
-            console.print("  ⚠️  Please enter a valid email address", style="red")
-            continue
-        return email
-
-
-def prompt_username() -> str:
-    """Smart username prompt with suggestions."""
-    panel = Panel(
-        Align.center(
-            Text.assemble(
-                Text("Enter your Git username for this profile", style="bold cyan"),
-                "\n\n",
-                Text("This will be used to:", style="dim"),
-                "\n",
-                Text("• Sign your commits", style="green"),
-                "\n",
-                Text("• Display your contributions", style="green"),
-                "\n",
-                Text("• Identify you in repositories", style="green"),
-            )
-        ),
-        title="Git Username",
-        box=box.ROUNDED,
-    )
-    console.print(panel)
-    
-    return get_user_input("Enter Git username", required=True)
-
-
-def prompt_directory(default_path: str | Path | None = None) -> Path:
-    """Smart directory prompt with path validation."""
-    if not default_path:
-        default_path = Path.home() / "workspace"
-    elif isinstance(default_path, str):
-        default_path = Path(default_path)
-    
-    panel = Panel(
-        Align.center(
-            Text.assemble(
-                Text("Choose a workspace directory for this profile", style="bold cyan"),
-                "\n\n",
-                Text("This directory will:", style="dim"),
-                "\n",
-                Text("• Store your Git repositories", style="green"),
-                "\n",
-                Text("• Use profile-specific Git config", style="green"),
-                "\n",
-                Text("• Help organize your work", style="green"),
-                "\n\n",
-                Text(f"Default: {default_path}", style="blue"),
-            )
-        ),
-        title="Workspace Directory",
-        box=box.ROUNDED,
-    )
-    console.print(panel)
-    
-    while True:
-        dir_str = get_user_input(
-            "Enter workspace directory",
-            default=str(default_path),
-            required=True
-        )
-        
-        try:
-            path = Path(dir_str).expanduser().resolve()
-            # Create directory if it doesn't exist
-            if not path.exists():
-                if confirm_action(f"Directory {path} doesn't exist. Create it?", default=True):
-                    path.mkdir(parents=True, exist_ok=True)
-                else:
-                    continue
-            return path
-        except Exception as e:
-            console.print(f"  ⚠️  Invalid path: {e}", style="red")
-
-
-def print_info(message: str) -> None:
-    """Print an info message."""
-    console.print(f"ℹ️  {message}", style="blue")
-
-
-def print_success(message: str) -> None:
-    """Print a success message."""
-    console.print(f"✅ {message}", style="green")
-
-
-def print_warning(message: str) -> None:
-    """Print a warning message."""
-    console.print(f"⚠️  {message}", style="yellow")
-
-
-def print_error(message: str) -> None:
-    """Print an error message with details if provided."""
-    if "\n" in message:
-        # If message contains newlines, format it as a panel
-        console.print(Panel(
-            message,
-            title="[red]Error[/red]",
-            border_style="red"
-        ))
-    else:
-        console.print(f"❌ {message}", style="red")
-
-
-def confirm_action(message: str, default: bool = False) -> bool:
-    """Confirm an action with the user."""
-    return Prompt.ask(
-        f"[yellow]{message}[/]",
-        choices=["y", "n"],
-        default="y" if default else "n"
-    ).lower() == "y"
-
-
-def get_user_input(
-    prompt: str,
-    default: Optional[str] = None,
-    required: bool = False,
-    completer: Optional[callable] = None,
-) -> str:
-    """Get user input with optional default value and completion."""
-    while True:
-        value = Prompt.ask(
-            f"[cyan]{prompt}[/]",
-            default=default or "",
-        ).strip()
-        
-        if not value and required:
-            print_error("This field is required")
-            continue
-            
-        return value
