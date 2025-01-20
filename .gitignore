@@ -180,3 +180,6 @@ pyrightconfig.json
 
 # .env
 .env
+
+# Development drafts
+docs/draft/
