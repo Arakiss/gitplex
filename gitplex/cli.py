@@ -8,16 +8,20 @@ from typing import Any, TypeVar, cast
 
 import click
 from rich.prompt import Prompt
+from rich.table import Table
+from rich import box
 
 from .backup import (
     backup_configs,
     check_existing_configs,
     restore_git_config,
     restore_ssh_config,
+    get_git_config,
 )
 from .exceptions import GitplexError, ProfileError, SystemConfigError
 from .profile import Profile, ProfileManager
 from .system import check_system_compatibility, clean_existing_configs
+from .ssh import copy_to_clipboard, test_ssh_connection
 from .ui import (
     confirm_action,
     print_error,
@@ -145,13 +149,190 @@ def setup(
     reuse_credentials: bool = True,
     clean_setup: bool = False,
 ) -> None:
-    """Set up a new Git profile with Git and SSH configurations.
-    
-    WARNING: Using --clean-setup will remove ALL existing Git and SSH configurations!
-    This includes all SSH keys, not just GitPlex-related ones.
-    Make sure to backup any important configurations before proceeding.
-    """
+    """Set up a new Git profile with Git and SSH configurations."""
     try:
+        # Print welcome message
+        if not non_interactive:
+            print_welcome()
+
+        # Check system compatibility first
+        check_system_compatibility()
+
+        # Scan for existing configurations
+        if not clean_setup:
+            print_info("\n🔍 Scanning for existing configurations...")
+            existing_configs = check_existing_configs()
+            
+            if existing_configs["git"]["exists"]:
+                console.print("\n[bold cyan]🔍 Existing Git Configuration[/bold cyan]")
+                git_info = Table(box=box.ROUNDED, show_header=False, border_style="blue")
+                git_info.add_column("Setting", style="dim")
+                git_info.add_column("Value", style="green")
+                
+                git_config = get_git_config()
+                if "user.email" in git_config:
+                    git_info.add_row("Email", git_config["user.email"])
+                if "user.name" in git_config:
+                    git_info.add_row("Username", git_config["user.name"])
+                if "github.user" in git_config:
+                    git_info.add_row("GitHub", git_config["github.user"])
+                
+                console.print(git_info)
+                
+                # Pre-fill values if not provided
+                if not email and "user.email" in git_config:
+                    email = git_config["user.email"]
+                    print_info("[dim]Using existing Git email[/dim]")
+                if not username and "user.name" in git_config:
+                    username = git_config["user.name"]
+                    print_info("[dim]Using existing Git username[/dim]")
+            
+            if existing_configs["ssh"]["exists"]:
+                console.print("\n[bold cyan]🔑 Existing SSH Configuration[/bold cyan]")
+                ssh_info = Table(box=box.ROUNDED, show_header=False, border_style="blue")
+                ssh_info.add_column("Type", style="dim")
+                ssh_info.add_column("Details", style="green")
+                
+                # Add SSH keys info
+                key_count = len(existing_configs["ssh"]["keys"])
+                ssh_info.add_row(
+                    "SSH Keys",
+                    f"{key_count} key{'s' if key_count != 1 else ''} found"
+                )
+                
+                # Add key details in a nested table
+                if existing_configs["ssh"]["keys"]:
+                    key_table = Table(
+                        box=None,
+                        show_header=False,
+                        show_edge=False,
+                        pad_edge=False
+                    )
+                    for key in existing_configs["ssh"]["keys"]:
+                        key_table.add_row(
+                            f"[dim]•[/dim] [blue]{key.name}[/blue] ([yellow]{key.key_type}[/yellow])"
+                        )
+                    ssh_info.add_row("", key_table)
+                
+                # Add provider info
+                if existing_configs["ssh"]["providers"]:
+                    providers_str = "\n".join(
+                        f"[dim]•[/dim] [blue]{p}[/blue]"
+                        for p in existing_configs["ssh"]["providers"]
+                    )
+                    ssh_info.add_row("Providers", providers_str)
+                
+                console.print(ssh_info)
+                
+                # Pre-fill provider if not provided and only one exists
+                if not provider and len(existing_configs["ssh"]["providers"]) == 1:
+                    provider = existing_configs["ssh"]["providers"][0]
+                    print_info(f"[dim]Using existing provider: {provider}[/dim]")
+            
+            # If we found existing configurations, ask what to do
+            if (existing_configs["git"]["exists"] or existing_configs["ssh"]["exists"]) and not non_interactive:
+                console.print("\n[bold cyan]📝 Setup Options[/bold cyan]")
+                options_table = Table(box=box.ROUNDED, show_header=False, border_style="cyan")
+                options_table.add_column("Option", style="bold yellow")
+                options_table.add_column("Description", style="white")
+                
+                options_table.add_row(
+                    "1. View/Manage Keys",
+                    "Inspect and manage existing SSH keys\n[dim]View key details, copy public keys, or test connections[/dim]"
+                )
+                options_table.add_row(
+                    "2. Reuse",
+                    "Keep existing configurations and add new profile\n[dim]Best for adding a new profile without affecting existing setup[/dim]"
+                )
+                options_table.add_row(
+                    "3. Backup",
+                    "Backup existing configs and start fresh\n[dim]Recommended if you want to start clean but keep a backup[/dim]"
+                )
+                options_table.add_row(
+                    "4. Clean",
+                    "Remove existing configs without backup\n[dim]⚠️ Use with caution - this will remove all existing configurations[/dim]"
+                )
+                
+                console.print(options_table)
+                console.print()
+                
+                choice = Prompt.ask(
+                    "[cyan]What would you like to do?[/cyan]",
+                    choices=["view", "reuse", "backup", "clean"],
+                    default="reuse"
+                )
+                
+                if choice == "view":
+                    # Show detailed key management menu
+                    key_table = Table(box=box.ROUNDED, show_header=True, border_style="blue")
+                    key_table.add_column("#", style="dim")
+                    key_table.add_column("Name", style="cyan")
+                    key_table.add_column("Type", style="yellow")
+                    key_table.add_column("Provider", style="green")
+                    
+                    for idx, key in enumerate(existing_configs["ssh"]["keys"], 1):
+                        provider = key.provider if hasattr(key, 'provider') else 'Unknown'
+                        key_table.add_row(
+                            str(idx),
+                            key.name,
+                            key.key_type,
+                            provider
+                        )
+                    
+                    console.print("\n[bold cyan]🔑 SSH Key Management[/bold cyan]")
+                    console.print(key_table)
+                    
+                    key_choice = Prompt.ask(
+                        "\n[cyan]Select a key to manage (or 'c' to continue setup)[/cyan]",
+                        choices=[str(i) for i in range(1, len(existing_configs["ssh"]["keys"]) + 1)] + ['c'],
+                        default='c'
+                    )
+                    
+                    if key_choice != 'c':
+                        selected_key = existing_configs["ssh"]["keys"][int(key_choice) - 1]
+                        console.print(f"\n[bold cyan]Selected Key: {selected_key.name}[/bold cyan]")
+                        
+                        key_action = Prompt.ask(
+                            "What would you like to do?",
+                            choices=["view", "copy", "test", "back"],
+                            default="view"
+                        )
+                        
+                        if key_action == "view":
+                            console.print("\n[bold]Public Key Content:[/bold]")
+                            console.print(selected_key.get_public_key())
+                        elif key_action == "copy":
+                            copy_to_clipboard(selected_key.get_public_key())
+                            print_success("Public key copied to clipboard!")
+                        elif key_action == "test":
+                            test_ssh_connection(selected_key.provider if hasattr(selected_key, 'provider') else 'github')
+                    
+                    # After key management, ask what to do next
+                    choice = Prompt.ask(
+                        "\n[cyan]How would you like to proceed with setup?[/cyan]",
+                        choices=["reuse", "backup", "clean"],
+                        default="reuse"
+                    )
+                
+                if choice == "backup":
+                    if not no_backup:
+                        backup_path = backup_configs()
+                        print_success(f"Configurations backed up to: {backup_path}")
+                    clean_existing_configs()
+                elif choice == "clean":
+                    if Confirm.ask(
+                        "\n⚠️  This will remove ALL existing configurations. Are you sure?",
+                        default=False
+                    ):
+                        clean_existing_configs()
+                    else:
+                        print_info("Operation cancelled")
+                        return
+                elif choice == "reuse":
+                    # Set reuse_credentials to True explicitly
+                    reuse_credentials = True
+                    print_info("\n[dim]Using existing configurations as base...[/dim]")
+        
         # Handle clean setup if requested
         if clean_setup:
             if non_interactive:
@@ -226,29 +407,22 @@ def setup(
                 print_info("\nYou can now create a new profile with: gitplex setup")
                 return  # Return here as well
 
-        # Print welcome message and continue with setup
-        if not non_interactive:
-            print_welcome()
-
-        # Check system compatibility
-        check_system_compatibility()
-
-        # Collect all profile information first
+        # Collect profile information
         if not name:
             name = prompt_name()
-
+        
         if not email:
             email = prompt_email()
-
+        
         if not username:
             username = prompt_username()
-
+        
         if not directory:
             directory = prompt_directory()
-
+        
         if not provider:
             provider = prompt_providers()[0]
-
+        
         # Create new profile
         try:
             profile = profile_manager.create_profile(
@@ -260,11 +434,11 @@ def setup(
                 force=force,
                 reuse_credentials=reuse_credentials,
             )
-
+            
             if not non_interactive:
                 print_setup_steps()
                 print_git_config_info(profile.workspace_dir)
-
+            
             print_success(f"Profile '{name}' created successfully")
             print_info(
                 f"Profile '{name}' is now active. Your Git and SSH configurations "
@@ -273,7 +447,6 @@ def setup(
         except FileNotFoundError as e:
             if "gpg" in str(e):
                 print_warning("GPG is not installed, skipping GPG key generation")
-                # Continue with profile creation without GPG
                 profile = profile_manager.create_profile(
                     name=name,
                     email=email,
@@ -282,7 +455,7 @@ def setup(
                     base_dir=directory,
                     force=force,
                     reuse_credentials=reuse_credentials,
-                    skip_gpg=True,  # Add this parameter to ProfileManager
+                    skip_gpg=True,
                 )
                 if not non_interactive:
                     print_setup_steps()
@@ -294,7 +467,7 @@ def setup(
                 )
             else:
                 raise
-
+    
     except (ProfileError, SystemConfigError) as e:
         raise GitplexError(str(e))
 

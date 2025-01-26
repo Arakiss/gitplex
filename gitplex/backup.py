@@ -11,6 +11,7 @@ from typing import Any
 
 from .exceptions import SystemConfigError, GitplexError
 from .ui_common import print_error, print_info, print_success, print_warning
+from .ssh import SSHKey
 
 logger = logging.getLogger(__name__)
 
@@ -19,16 +20,159 @@ BACKUP_DIR = GITPLEX_DIR / "backups"
 GIT_CONFIG = Path.home() / ".gitconfig"
 SSH_CONFIG = Path.home() / ".ssh" / "config"
 
-def check_existing_configs() -> bool:
+def get_git_config() -> dict[str, str]:
+    """Get current Git global configuration.
+    
+    Returns:
+        Dictionary with Git configuration key-value pairs
+    """
+    try:
+        config = {}
+        output = subprocess.check_output(["git", "config", "--global", "--list"]).decode()
+        for line in output.splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                config[key.strip()] = value.strip()
+        return config
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to get Git config: {e}", exc_info=True)
+        return {}
+
+def parse_ssh_key(key_file: Path) -> SSHKey | None:
+    """Parse an SSH key file and extract its metadata.
+    
+    Args:
+        key_file: Path to the private key file
+        
+    Returns:
+        SSHKey object or None if parsing fails
+    """
+    try:
+        pub_key_path = key_file.parent / f"{key_file.name}.pub"
+        if not pub_key_path.exists():
+            return None
+            
+        # Read public key to get metadata
+        pub_key_content = pub_key_path.read_text().strip()
+        parts = pub_key_content.split()
+        if len(parts) < 2:
+            return None
+            
+        key_type = parts[0].replace('ssh-', '')  # Remove ssh- prefix
+        comment = parts[2] if len(parts) > 2 else ""
+        
+        # Try to determine provider from key name or comment
+        provider = "unknown"
+        if "github" in key_file.name.lower() or "github" in comment.lower():
+            provider = "github"
+        elif "gitlab" in key_file.name.lower() or "gitlab" in comment.lower():
+            provider = "gitlab"
+            
+        # Use key name as profile name if no better option
+        profile_name = key_file.stem.replace('id_', '')
+        
+        return SSHKey(
+            private_key=key_file,
+            public_key=pub_key_path,
+            key_type=key_type,
+            comment=comment,
+            provider=provider,
+            profile_name=profile_name
+        )
+    except Exception as e:
+        logger.warning(f"Failed to parse SSH key {key_file}: {e}")
+        return None
+
+def check_existing_configs() -> dict:
     """Check for existing Git and SSH configurations.
     
     Returns:
-        True if any configurations exist, False otherwise
+        dict: Dictionary containing information about existing configurations:
+        {
+            "git": {
+                "exists": bool,
+                "config": dict,
+                "providers": list[str]
+            },
+            "ssh": {
+                "exists": bool,
+                "keys": list[SSHKey],
+                "providers": list[str]
+            }
+        }
     """
-    return any([
-        GIT_CONFIG.exists(),
-        SSH_CONFIG.exists(),
-    ])
+    result = {
+        "git": {
+            "exists": False,
+            "config": {},
+            "providers": []
+        },
+        "ssh": {
+            "exists": False,
+            "keys": [],
+            "providers": []
+        }
+    }
+    
+    # Check Git configuration
+    git_config = Path.home() / ".gitconfig"
+    if git_config.exists():
+        result["git"]["exists"] = True
+        try:
+            # Parse git config
+            config = {}
+            output = subprocess.check_output(["git", "config", "--global", "--list"]).decode()
+            for line in output.splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    config[key.strip()] = value.strip()
+            result["git"]["config"] = config
+            
+            # Check for provider configurations
+            providers = []
+            if "github.user" in config:
+                providers.append("github")
+            if "gitlab.user" in config:
+                providers.append("gitlab")
+            result["git"]["providers"] = providers
+        except subprocess.CalledProcessError:
+            pass
+    
+    # Check SSH configuration
+    ssh_dir = Path.home() / ".ssh"
+    if ssh_dir.exists():
+        # Look for SSH keys
+        keys = []
+        providers = set()
+        
+        for key_file in ssh_dir.glob("id_*"):
+            if key_file.suffix not in [".pub"]:  # Only process private keys
+                if key := parse_ssh_key(key_file):
+                    keys.append(key)
+                    if key.provider != "unknown":
+                        providers.add(key.provider)
+        
+        if keys:
+            result["ssh"]["exists"] = True
+            result["ssh"]["keys"] = keys
+            result["ssh"]["providers"] = list(providers)
+        
+        # Check SSH config file
+        ssh_config = ssh_dir / "config"
+        if ssh_config.exists():
+            result["ssh"]["exists"] = True
+            try:
+                with ssh_config.open() as f:
+                    for line in f:
+                        if "Host github.com" in line:
+                            providers.add("github")
+                        elif "Host gitlab.com" in line:
+                            providers.add("gitlab")
+                result["ssh"]["providers"] = list(providers)
+            except OSError:
+                pass
+    
+    return result
 
 def backup_configs() -> Path:
     """Back up existing Git and SSH configurations.

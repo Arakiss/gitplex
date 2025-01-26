@@ -140,7 +140,7 @@ class ProfileManager:
             name: Profile name
             email: Git email
             username: Git username
-            provider: Git provider name
+            provider: Git provider name (e.g. 'github')
             base_dir: Base directory for workspace
             force: Force overwrite existing profile
             reuse_credentials: Reuse existing credentials if they match
@@ -166,13 +166,86 @@ class ProfileManager:
                     credentials = None
         
         if not credentials:
-            # Set up SSH keys only if we're not reusing credentials
-            ssh_key = setup_ssh_keys(name, provider, email)
+            # Set up SSH key for the provider (not profile-specific)
+            ssh_key = None
+            provider_key_name = f"id_{provider}"  # e.g. id_github
+            ssh_key_path = Path(f"~/.ssh/{provider_key_name}").expanduser()
+            
+            if ssh_key_path.exists():
+                print_info(f"\n🔑 Found existing SSH key for {provider}")
+                ssh_key = SSHKey(
+                    private_key=ssh_key_path,
+                    public_key=Path(f"{ssh_key_path}.pub"),
+                )
+                # Show the existing key
+                print_info("\nExisting SSH public key:")
+                print_info("-" * 50)
+                print_info(ssh_key.public_key.read_text().strip())
+                print_info("-" * 50)
+                
+                # Test the connection
+                if test_ssh_connection(provider):
+                    print_success("✅ SSH connection test successful!")
+                else:
+                    print_warning("⚠️  SSH connection test failed")
+                    print_info("\nPossible solutions:")
+                    print_info("1. Verify the key is added to your GitHub account")
+                    print_info("2. Check your SSH agent: ssh-add ~/.ssh/id_github")
+                    print_info("3. Test connection manually: ssh -T git@github.com")
+                    if Confirm.ask("Would you like to create a new key instead?", default=False):
+                        ssh_key = None
+            
+            if not ssh_key:
+                print_info(f"\n🔑 Creating new SSH key for {provider}...")
+                ssh_key = setup_ssh_keys(provider_key_name, provider, email)
+                
+                # Show the new key prominently
+                print_info("\n📋 Your new SSH public key (copied to clipboard):")
+                print_info("-" * 50)
+                key_content = ssh_key.public_key.read_text().strip()
+                print_info(key_content)
+                print_info("-" * 50)
+                
+                # Copy to clipboard
+                import pyperclip
+                try:
+                    pyperclip.copy(key_content)
+                    print_success("✅ Key copied to clipboard!")
+                except Exception:
+                    print_warning("Could not copy to clipboard automatically")
+                
+                # Show next steps clearly
+                print_info("\n📝 Next steps:")
+                if provider == "github":
+                    print_info("1. Open GitHub SSH settings: https://github.com/settings/keys")
+                    print_info("2. Click 'New SSH key'")
+                    print_info("3. Paste the key (it's already in your clipboard)")
+                    print_info("4. Click 'Add SSH key'")
+                elif provider == "gitlab":
+                    print_info("1. Open GitLab SSH settings: https://gitlab.com/-/profile/keys")
+                    print_info("2. Paste the key (it's already in your clipboard)")
+                    print_info("3. Click 'Add key'")
+                
+                # Wait for user to add the key
+                print_info("\nPress Enter after adding the key to test the connection...")
+                input()
+                
+                # Test the connection
+                if test_ssh_connection(provider):
+                    print_success("✅ SSH connection test successful!")
+                else:
+                    print_warning("⚠️  SSH connection test failed")
+                    print_info("\nTroubleshooting steps:")
+                    print_info("1. Verify you added the key correctly")
+                    print_info("2. Try: ssh-add ~/.ssh/id_github")
+                    print_info("3. Test manually: ssh -T git@github.com")
+                    print_info("\nContinuing with setup, but please fix the SSH connection later")
             
             # Set up GPG key if not skipped
             gpg_key = None
             if not skip_gpg:
                 try:
+                    print_info("\n🔐 Setting up GPG key...")
                     gpg_key = setup_gpg_key(username, email, f"GitPlex {name}")
                     print_gpg_key_info(gpg_key)
                 except FileNotFoundError:
@@ -187,6 +260,7 @@ class ProfileManager:
             self.credentials[f"{email}_{username}"] = credentials
         
         # Set up workspace
+        print_info("\n📁 Setting up workspace...")
         workspace_dir = setup_workspace(
             profile_name=name,
             email=email,
@@ -209,7 +283,18 @@ class ProfileManager:
         self.profiles[name] = profile
         self._save_profiles()
         
-        print_success(f"Created profile: {name}")
+        print_success(f"\n✨ Profile '{name}' created successfully!")
+        
+        # Show final configuration summary
+        print_info("\n📝 Configuration Summary:")
+        print_info(f"• Profile: {name}")
+        print_info(f"• Email: {email}")
+        print_info(f"• Username: {username}")
+        print_info(f"• Provider: {provider}")
+        print_info(f"• Workspace: {workspace_dir}")
+        print_info(f"• SSH Key: {credentials.ssh_key.private_key if credentials.ssh_key else 'None'}")
+        print_info(f"• GPG Key: {credentials.gpg_key.key_id if credentials.gpg_key else 'None'}")
+        
         return profile
 
     def get_profile(self, name: str) -> Profile:
