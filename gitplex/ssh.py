@@ -4,7 +4,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Any
 
 from .exceptions import GitplexError
 from .ui_common import print_error, print_info, print_success, print_warning
@@ -38,6 +38,29 @@ class SSHKey:
         if not self.public_key.exists():
             raise GitplexError(f"Public key not found: {self.public_key}")
         return self.public_key.read_text().strip()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert SSH key to dictionary for serialization."""
+        return {
+            "private_key": str(self.private_key),
+            "public_key": str(self.public_key),
+            "key_type": self.key_type,
+            "comment": self.comment,
+            "provider": self.provider,
+            "profile_name": self.profile_name,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SSHKey":
+        """Create SSH key from dictionary."""
+        return cls(
+            private_key=Path(data["private_key"]),
+            public_key=Path(data["public_key"]),
+            key_type=data["key_type"],
+            comment=data["comment"],
+            provider=data["provider"],
+            profile_name=data["profile_name"],
+        )
 
 def copy_to_clipboard(text: str) -> None:
     """Copy text to clipboard."""
@@ -97,6 +120,16 @@ def generate_ssh_key(
     except OSError as e:
         raise GitplexError(f"Failed to set key permissions: {e}") from e
 
+def get_provider_hostname(provider: str) -> str:
+    """Get hostname for Git provider."""
+    hostnames = {
+        "github": "github.com",
+        "gitlab": "gitlab.com",
+        "bitbucket": "bitbucket.org",
+        "azure": "dev.azure.com",
+    }
+    return hostnames.get(provider.lower(), provider)
+
 def add_to_ssh_config(key: SSHKey) -> None:
     """Add SSH key to SSH config file."""
     config_path = SSH_DIR / "config"
@@ -109,11 +142,14 @@ def add_to_ssh_config(key: SSHKey) -> None:
         # Read existing config
         config = config_path.read_text()
         
+        # Get provider hostname
+        hostname = get_provider_hostname(key.provider)
+        
         # Build host config
         host_config = f"""
 # GitPlex: {key.profile_name} ({key.provider})
-Host {key.provider}
-    HostName {get_provider_hostname(key.provider)}
+Host {hostname}
+    HostName {hostname}
     User git
     IdentityFile {key.private_key}
     IdentitiesOnly yes
@@ -121,14 +157,14 @@ Host {key.provider}
 """
         
         # Check if host already exists
-        if f"Host {key.provider}" in config:
-            print_warning(f"SSH config for {key.provider} already exists, updating...")
+        if f"Host {hostname}" in config:
+            print_warning(f"SSH config for {hostname} already exists, updating...")
             # Remove existing config
             lines = config.splitlines()
             new_lines = []
             skip = False
             for line in lines:
-                if f"Host {key.provider}" in line:
+                if f"Host {hostname}" in line:
                     skip = True
                 elif skip and not line.strip():
                     skip = False
@@ -196,16 +232,6 @@ def test_ssh_connection(provider: str) -> bool:
         print_error(f"SSH connection to {provider} failed: {e.stderr}")
         return False
 
-def get_provider_hostname(provider: str) -> str:
-    """Get hostname for Git provider."""
-    hostnames = {
-        "github": "github.com",
-        "gitlab": "gitlab.com",
-        "bitbucket": "bitbucket.org",
-        "azure": "dev.azure.com",
-    }
-    return hostnames.get(provider, provider)
-
 def setup_ssh_keys(
     profile_name: str,
     provider: str,
@@ -231,7 +257,7 @@ def setup_ssh_keys(
         profile_name=profile_name,
     )
     
-    # Generate key pair
+    # Generate key pair if it doesn't exist
     if not key.exists():
         generate_ssh_key(
             key_type=key_type,
@@ -248,14 +274,10 @@ def setup_ssh_keys(
     # Add to SSH agent
     add_to_ssh_agent(key)
     
-    # Display public key and copy to clipboard
+    # Get public key content
     public_key_content = key.get_public_key()
-    print_info("\nYour public SSH key (add this to your GitHub account):")
-    print_info(public_key_content)
-    copy_to_clipboard(public_key_content)
-    print_info("\nAdd this key to your GitHub account at: https://github.com/settings/keys")
     
-    # Test connection
-    test_ssh_connection(provider)
+    # Copy to clipboard
+    copy_to_clipboard(public_key_content)
     
     return key

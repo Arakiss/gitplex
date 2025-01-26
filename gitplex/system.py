@@ -8,10 +8,16 @@ import logging
 from datetime import datetime
 from pathlib import Path
 import platform
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from .exceptions import BackupError, SystemConfigError
-from .ui_common import print_error, print_info, print_success, print_warning
+from .ui_common import (
+    console,
+    print_error,
+    print_info,
+    print_success,
+    print_warning,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,23 +101,120 @@ def get_home_dir() -> Path:
     return home
 
 
-def get_existing_configs() -> dict[str, Path]:
-    """Get paths of existing Git and SSH configurations.
+def get_existing_configs() -> Dict[str, Any]:
+    """Get detailed information about existing Git and SSH configurations.
 
     Returns:
-        Dictionary of config names and their paths
+        Dictionary containing information about existing configurations
     """
     home = get_home_dir()
     configs = {
-        "git_config": home / ".gitconfig",
-        "ssh_config": home / ".ssh" / "config",
-        "ssh_keys": home / ".ssh",
+        "git": {
+            "global_config": home / ".gitconfig",
+            "exists": False,
+            "email": None,
+            "username": None,
+            "providers": [],
+        },
+        "ssh": {
+            "config": home / ".ssh" / "config",
+            "keys_dir": home / ".ssh",
+            "exists": False,
+            "keys": [],
+            "providers": [],
+        }
     }
-    return {
-        name: path
-        for name, path in configs.items()
-        if path.exists()
-    }
+    
+    # Check Git config
+    git_config = configs["git"]["global_config"]
+    if git_config.exists():
+        configs["git"]["exists"] = True
+        try:
+            # Get Git config values
+            email = subprocess.run(
+                ["git", "config", "--global", "user.email"],
+                capture_output=True,
+                text=True,
+                check=True
+            ).stdout.strip()
+            username = subprocess.run(
+                ["git", "config", "--global", "user.name"],
+                capture_output=True,
+                text=True,
+                check=True
+            ).stdout.strip()
+            
+            configs["git"]["email"] = email
+            configs["git"]["username"] = username
+            
+            # Try to detect providers from remotes
+            try:
+                remotes = subprocess.run(
+                    ["git", "remote", "-v"],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                ).stdout
+                
+                for remote in remotes.splitlines():
+                    if "github.com" in remote:
+                        if "github" not in configs["git"]["providers"]:
+                            configs["git"]["providers"].append("github")
+                    elif "gitlab.com" in remote:
+                        if "gitlab" not in configs["git"]["providers"]:
+                            configs["git"]["providers"].append("gitlab")
+                    elif "bitbucket.org" in remote:
+                        if "bitbucket" not in configs["git"]["providers"]:
+                            configs["git"]["providers"].append("bitbucket")
+                    elif "dev.azure.com" in remote:
+                        if "azure" not in configs["git"]["providers"]:
+                            configs["git"]["providers"].append("azure")
+            except subprocess.CalledProcessError:
+                # Not in a git repository, ignore
+                pass
+                
+        except subprocess.CalledProcessError:
+            # Config exists but values not set
+            pass
+    
+    # Check SSH config and keys
+    ssh_dir = configs["ssh"]["keys_dir"]
+    if ssh_dir.exists():
+        configs["ssh"]["exists"] = True
+        
+        # Check SSH config
+        ssh_config = configs["ssh"]["config"]
+        if ssh_config.exists():
+            config_content = ssh_config.read_text()
+            
+            # Try to detect providers from SSH config
+            for provider in ["github.com", "gitlab.com", "bitbucket.org", "dev.azure.com"]:
+                if provider in config_content:
+                    provider_name = provider.split(".")[0]
+                    if provider_name not in configs["ssh"]["providers"]:
+                        configs["ssh"]["providers"].append(provider_name)
+        
+        # List SSH keys
+        for key_file in ssh_dir.glob("id_*"):
+            if key_file.suffix != ".pub":
+                key_info = {
+                    "path": key_file,
+                    "type": key_file.stem.split("_")[-1],
+                    "name": key_file.stem,
+                }
+                
+                # Try to get key comment (usually contains email)
+                pub_key = key_file.with_suffix(".pub")
+                if pub_key.exists():
+                    try:
+                        key_comment = pub_key.read_text().strip().split(" ")[-1]
+                        key_info["comment"] = key_comment
+                    except Exception:
+                        pass
+                
+                configs["ssh"]["keys"].append(key_info)
+    
+    return configs
 
 
 def backup_configs() -> Path:
@@ -257,6 +360,7 @@ def check_system_compatibility() -> None:
         
         print_success("System compatibility check passed")
     except Exception as e:
+        logger.error("System compatibility check failed", exc_info=True)
         raise SystemConfigError(f"System compatibility check failed: {e}") from e
 
 
@@ -347,3 +451,116 @@ def get_system_info() -> dict[str, str]:
         "processor": platform.processor(),
         "python": platform.python_version(),
     }
+
+def clean_existing_configs() -> None:
+    """Remove ALL Git and SSH configurations.
+    
+    WARNING: This is a destructive operation that will remove:
+    - Global Git config (~/.gitconfig)
+    - ALL SSH keys and configurations in ~/.ssh
+    - GPG keys containing 'gitplex' (if GPG is installed)
+    - GitPlex profiles and settings
+    
+    Make sure to backup any important configurations before calling this function.
+    """
+    home = get_home_dir()
+    cleaned_items = []
+    existing_items = []
+    
+    # Check Git config
+    git_config = home / ".gitconfig"
+    if git_config.exists():
+        existing_items.append(f"Global Git config: {git_config}")
+        try:
+            git_config.unlink()
+            cleaned_items.append(f"Global Git config: {git_config}")
+        except OSError as e:
+            print_error(f"Failed to remove Git config: {e}")
+    
+    # Check SSH config and keys
+    ssh_dir = home / ".ssh"
+    if ssh_dir.exists():
+        # Handle SSH config
+        ssh_config = ssh_dir / "config"
+        if ssh_config.exists():
+            existing_items.append(f"SSH config: {ssh_config}")
+            try:
+                # Backup original config
+                backup_path = ssh_config.with_suffix(".bak")
+                shutil.copy2(ssh_config, backup_path)
+                print_success(f"Original SSH config backed up to: {backup_path}")
+                
+                # Remove the config file completely
+                ssh_config.unlink()
+                cleaned_items.append(f"SSH config: {ssh_config}")
+            except OSError as e:
+                print_error(f"Failed to remove SSH config: {e}")
+        
+        # Remove ALL SSH keys
+        removed_keys = []
+        for key_file in ssh_dir.glob("id_*"):
+            existing_items.append(f"SSH key: {key_file}")
+            try:
+                key_file.unlink(missing_ok=True)
+                pub_key = key_file.with_suffix(".pub")
+                if pub_key.exists():
+                    pub_key.unlink()
+                removed_keys.append(key_file.name)
+            except OSError as e:
+                print_error(f"Failed to remove SSH key {key_file}: {e}")
+        
+        if removed_keys:
+            cleaned_items.append(f"SSH keys in {ssh_dir}: {', '.join(removed_keys)}")
+    
+    # Check GPG configurations (only GitPlex-related ones for safety)
+    try:
+        # Check if GPG is installed
+        subprocess.run(
+            ["gpg", "--version"],
+            capture_output=True,
+            check=True,
+        )
+        
+        # List and remove GitPlex GPG keys
+        result = subprocess.run(
+            ["gpg", "--list-secret-keys", "--keyid-format", "LONG"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if "gitplex" in line.lower():
+                    try:
+                        key_id = line.split("/")[1].split(" ")[0]
+                        existing_items.append(f"GPG key: {key_id}")
+                        subprocess.run(
+                            ["gpg", "--delete-secret-and-public-key", "--yes", key_id],
+                            capture_output=True,
+                            check=True,
+                        )
+                        cleaned_items.append(f"GPG key: {key_id}")
+                    except (subprocess.CalledProcessError, IndexError) as e:
+                        print_error(f"Failed to remove GPG key: {e}")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print_warning("GPG is not installed, skipping GPG cleanup")
+    
+    # Remove GitPlex directory
+    gitplex_dir = home / ".gitplex"
+    if gitplex_dir.exists():
+        existing_items.append(f"GitPlex data directory: {gitplex_dir}")
+        try:
+            shutil.rmtree(gitplex_dir)
+            cleaned_items.append(f"GitPlex data directory: {gitplex_dir}")
+        except OSError as e:
+            print_error(f"Failed to remove GitPlex directory: {e}")
+    
+    # Print summary
+    if not existing_items:
+        print_info("No existing configurations found - starting with a clean slate")
+    else:
+        if cleaned_items:
+            console.print("\n[bold green]Cleaned configurations:[/bold green]")
+            for item in cleaned_items:
+                console.print(f"[green]✓[/green] {item}")
+        else:
+            print_warning("Found configurations but failed to clean them. Check the errors above.")

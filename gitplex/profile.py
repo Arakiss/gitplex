@@ -3,13 +3,14 @@
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, List
 
 from rich.prompt import Confirm
 
 from .exceptions import GitplexError
+from .gpg import GPGKey, setup_gpg_key
 from .ssh import SSHKey, setup_ssh_keys, test_ssh_connection
-from .ui import print_error, print_info, print_success, print_warning
+from .ui import print_error, print_info, print_success, print_warning, print_gpg_key_info
 from .workspace import (
     GITPLEX_DIR,
     GitConfig,
@@ -20,60 +21,62 @@ from .workspace import (
 
 PROFILES_FILE = GITPLEX_DIR / "profiles.json"
 
+@dataclass
+class GitCredentials:
+    """Git credentials that can be shared between profiles."""
+    email: str
+    username: str
+    ssh_key: Optional[SSHKey] = None
+    gpg_key: Optional[GPGKey] = None
 
 @dataclass
 class Profile:
     """Git profile configuration."""
     name: str
-    email: str
-    username: str
-    provider: str
+    credentials: GitCredentials
+    provider: str  # Ahora es un solo string
     workspace_dir: Path
-    ssh_key: SSHKey
     is_active: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Convert profile to dictionary for serialization."""
         return {
             "name": self.name,
-            "email": self.email,
-            "username": self.username,
+            "credentials": {
+                "email": self.credentials.email,
+                "username": self.credentials.username,
+                "ssh_key": self.credentials.ssh_key.to_dict() if self.credentials.ssh_key else None,
+                "gpg_key": self.credentials.gpg_key.to_dict() if self.credentials.gpg_key else None,
+            },
             "provider": self.provider,
             "workspace_dir": str(self.workspace_dir),
-            "ssh_key": {
-                "private_key": str(self.ssh_key.private_key),
-                "public_key": str(self.ssh_key.public_key),
-                "key_type": self.ssh_key.key_type,
-                "comment": self.ssh_key.comment,
-                "provider": self.ssh_key.provider,
-                "profile_name": self.ssh_key.profile_name,
-            },
             "is_active": self.is_active,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Profile":
         """Create profile from dictionary."""
-        ssh_data = data["ssh_key"]
-        ssh_key = SSHKey(
-            private_key=Path(ssh_data["private_key"]),
-            public_key=Path(ssh_data["public_key"]),
-            key_type=ssh_data["key_type"],
-            comment=ssh_data["comment"],
-            provider=ssh_data["provider"],
-            profile_name=ssh_data["profile_name"],
+        cred_data = data["credentials"]
+        ssh_data = cred_data.get("ssh_key")
+        gpg_data = cred_data.get("gpg_key")
+        
+        ssh_key = SSHKey.from_dict(ssh_data) if ssh_data else None
+        gpg_key = GPGKey.from_dict(gpg_data) if gpg_data else None
+        
+        credentials = GitCredentials(
+            email=cred_data["email"],
+            username=cred_data["username"],
+            ssh_key=ssh_key,
+            gpg_key=gpg_key,
         )
         
         return cls(
             name=data["name"],
-            email=data["email"],
-            username=data["username"],
+            credentials=credentials,
             provider=data["provider"],
             workspace_dir=Path(data["workspace_dir"]),
-            ssh_key=ssh_key,
             is_active=data.get("is_active", False),
         )
-
 
 class ProfileManager:
     """Manages Git profiles."""
@@ -81,6 +84,7 @@ class ProfileManager:
     def __init__(self) -> None:
         """Initialize profile manager."""
         self.profiles: dict[str, Profile] = {}
+        self.credentials: dict[str, GitCredentials] = {}
         self._load_profiles()
 
     def _load_profiles(self) -> None:
@@ -93,6 +97,11 @@ class ProfileManager:
             self.profiles = {
                 name: Profile.from_dict(profile_data)
                 for name, profile_data in data.items()
+            }
+            # Extract unique credentials
+            self.credentials = {
+                f"{p.credentials.email}_{p.credentials.username}": p.credentials
+                for p in self.profiles.values()
             }
         except Exception as e:
             raise GitplexError(f"Failed to load profiles: {e}") from e
@@ -109,6 +118,11 @@ class ProfileManager:
         except Exception as e:
             raise GitplexError(f"Failed to save profiles: {e}") from e
 
+    def find_matching_credentials(self, email: str, username: str) -> Optional[GitCredentials]:
+        """Find existing credentials that match the given email and username."""
+        cred_key = f"{email}_{username}"
+        return self.credentials.get(cred_key)
+
     def create_profile(
         self,
         name: str,
@@ -117,6 +131,8 @@ class ProfileManager:
         provider: str,
         base_dir: Optional[Path] = None,
         force: bool = False,
+        reuse_credentials: bool = True,
+        skip_gpg: bool = False,
     ) -> Profile:
         """Create a new Git profile.
         
@@ -124,23 +140,51 @@ class ProfileManager:
             name: Profile name
             email: Git email
             username: Git username
-            provider: Git provider
-            base_dir: Base directory for workspaces
-            force: Whether to overwrite existing profile
+            provider: Git provider name
+            base_dir: Base directory for workspace
+            force: Force overwrite existing profile
+            reuse_credentials: Reuse existing credentials if they match
+            skip_gpg: Skip GPG key generation
         
         Returns:
-            Created Profile object
+            Created profile
         """
-        # Check if profile exists
         if name in self.profiles and not force:
             if not Confirm.ask(
                 f"Profile {name} already exists. Overwrite?",
                 default=False
             ):
-                raise GitplexError("Profile creation cancelled")
+                raise GitplexError(f"Profile {name} already exists")
         
-        # Set up SSH keys
-        ssh_key = setup_ssh_keys(name, provider, email)
+        # Check for existing credentials
+        credentials = None
+        if reuse_credentials:
+            credentials = self.find_matching_credentials(email, username)
+            if credentials:
+                print_info(f"Found existing credentials for {email} ({username})")
+                if not Confirm.ask("Would you like to reuse these credentials?", default=True):
+                    credentials = None
+        
+        if not credentials:
+            # Set up SSH keys only if we're not reusing credentials
+            ssh_key = setup_ssh_keys(name, provider, email)
+            
+            # Set up GPG key if not skipped
+            gpg_key = None
+            if not skip_gpg:
+                try:
+                    gpg_key = setup_gpg_key(username, email, f"GitPlex {name}")
+                    print_gpg_key_info(gpg_key)
+                except FileNotFoundError:
+                    print_warning("GPG is not installed, skipping GPG key generation")
+            
+            credentials = GitCredentials(
+                email=email,
+                username=username,
+                ssh_key=ssh_key,
+                gpg_key=gpg_key,
+            )
+            self.credentials[f"{email}_{username}"] = credentials
         
         # Set up workspace
         workspace_dir = setup_workspace(
@@ -148,18 +192,17 @@ class ProfileManager:
             email=email,
             username=username,
             provider=provider,
-            ssh_key=ssh_key.private_key,
+            ssh_key=credentials.ssh_key.private_key if credentials.ssh_key else None,
+            gpg_key=credentials.gpg_key.key_id if credentials.gpg_key else None,
             base_dir=base_dir,
         )
         
         # Create profile
         profile = Profile(
             name=name,
-            email=email,
-            username=username,
+            credentials=credentials,
             provider=provider,
             workspace_dir=workspace_dir,
-            ssh_key=ssh_key,
         )
         
         # Save profile
@@ -170,46 +213,52 @@ class ProfileManager:
         return profile
 
     def get_profile(self, name: str) -> Profile:
-        """Get a profile by name.
-        
-        Args:
-            name: Profile name
-        
-        Returns:
-            Profile object
-        """
+        """Get a profile by name."""
         if name not in self.profiles:
             raise GitplexError(f"Profile not found: {name}")
         return self.profiles[name]
 
     def list_profiles(self) -> list[Profile]:
-        """Get all profiles.
-        
-        Returns:
-            List of Profile objects
-        """
+        """Get all profiles."""
         return list(self.profiles.values())
 
-    def delete_profile(self, name: str, keep_files: bool = False) -> None:
+    def delete_profile(
+        self,
+        name: str,
+        keep_files: bool = False,
+        keep_credentials: bool = True
+    ) -> None:
         """Delete a profile.
         
         Args:
             name: Profile name
             keep_files: Whether to keep workspace and SSH files
+            keep_credentials: Whether to keep shared credentials
         """
         if name not in self.profiles:
             raise GitplexError(f"Profile not found: {name}")
         
         profile = self.profiles[name]
         
-        if not keep_files:
-            # Remove SSH keys
-            try:
-                profile.ssh_key.private_key.unlink(missing_ok=True)
-                profile.ssh_key.public_key.unlink(missing_ok=True)
-                print_success("Removed SSH keys")
-            except OSError as e:
-                print_warning(f"Failed to remove SSH keys: {e}")
+        if not keep_files and profile.credentials.ssh_key:
+            # Only remove SSH keys if they're not used by other profiles
+            cred_key = f"{profile.credentials.email}_{profile.credentials.username}"
+            if not keep_credentials and not any(
+                p.credentials.email == profile.credentials.email
+                and p.credentials.username == profile.credentials.username
+                and p.name != name
+                for p in self.profiles.values()
+            ):
+                try:
+                    profile.credentials.ssh_key.private_key.unlink(missing_ok=True)
+                    profile.credentials.ssh_key.public_key.unlink(missing_ok=True)
+                    print_success("Removed SSH keys")
+                    # Remove credentials
+                    self.credentials.pop(cred_key, None)
+                except OSError as e:
+                    print_warning(f"Failed to remove SSH keys: {e}")
+            else:
+                print_info("SSH keys are shared with other profiles, keeping them")
             
             # Remove workspace
             try:
@@ -285,7 +334,7 @@ class ProfileManager:
         profile = self.profiles[name]
         
         # Check SSH keys
-        if not profile.ssh_key.exists():
+        if not profile.credentials.ssh_key.exists():
             print_error("SSH keys not found")
             return False
         
@@ -298,9 +347,9 @@ class ProfileManager:
         try:
             config = get_workspace_git_config(profile.workspace_dir)
             if (
-                config["user.email"] != profile.email
-                or config["user.name"] != profile.username
-                or config["github.user"] != profile.username
+                config["user.email"] != profile.credentials.email
+                or config["user.name"] != profile.credentials.username
+                or config["github.user"] != profile.credentials.username
             ):
                 print_error("Git configuration mismatch")
                 return False
