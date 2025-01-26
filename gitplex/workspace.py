@@ -5,7 +5,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, List
 
 import git
 from rich.prompt import Confirm
@@ -20,11 +20,13 @@ BACKUP_DIR = GITPLEX_DIR / "backups"
 @dataclass
 class GitConfig:
     """Git configuration for a profile."""
+    profile_name: str
     email: str
     username: str
     provider: str
     ssh_key: Path
     workspace_dir: Path
+    gpg_key: Optional[str] = None
 
 
 def setup_gitplex_directory() -> None:
@@ -179,49 +181,41 @@ def setup_workspace(
     email: str,
     username: str,
     provider: str,
-    ssh_key: Path,
+    ssh_key: Optional[Path] = None,
+    gpg_key: Optional[str] = None,
     base_dir: Optional[Path] = None,
 ) -> Path:
-    """Set up a new workspace for a Git profile.
-    
-    This function:
-    1. Creates the workspace directory
-    2. Backs up existing Git config
-    3. Creates profile-specific Git config
-    4. Updates global Git config
+    """Set up a workspace directory for a profile.
     
     Args:
-        profile_name: Name of the Git profile
+        profile_name: Profile name
         email: Git email
         username: Git username
-        provider: Git provider
-        ssh_key: Path to SSH private key
-        base_dir: Base directory for workspaces (default: ~/Projects)
+        provider: Git provider name
+        ssh_key: Path to SSH key
+        gpg_key: GPG key ID for signing commits
+        base_dir: Base directory for workspace
     
     Returns:
-        Path to the created workspace
+        Path to workspace directory
     """
-    # Set default base directory if not provided
     if base_dir is None:
         base_dir = Path.home() / "Projects"
     
-    # Create workspace path
+    # Create workspace directory
     workspace_dir = base_dir / profile_name
+    workspace_dir.mkdir(parents=True, exist_ok=True)
     
-    # Backup existing config
-    backup_git_config()
-    
-    # Create Git configuration
-    config = GitConfig(
+    # Set up Git config
+    git_config = GitConfig(
+        profile_name=profile_name,
         email=email,
         username=username,
         provider=provider,
-        ssh_key=ssh_key,
+        ssh_key=ssh_key or Path.home() / ".ssh" / f"id_{profile_name}_ed25519",
         workspace_dir=workspace_dir,
+        gpg_key=gpg_key,
     )
-    
-    # Create workspace and config
-    create_git_config(config)
     
     return workspace_dir
 
