@@ -11,37 +11,75 @@ logger = logging.getLogger(__name__)
 class GitConfig:
     """Manages Git configuration for a profile."""
     
-    def __init__(self, profile_name: str) -> None:
-        """Initialize Git configuration manager."""
-        self.profile_name = profile_name
-        self.global_config = Path.home() / ".gitconfig"
-
-    def setup_config(
+    def __init__(
         self,
+        profile_name: str,
         email: str,
         username: str,
-        ssh_key_path: Optional[Path],
-        providers: List[str],
-        directory: Path,
+        provider: str,
+        ssh_key: Path,
+        workspace_dir: Path,
+        gpg_key: Optional[str] = None,
     ) -> None:
-        """Set up Git configuration for a workspace."""
+        """Initialize Git configuration manager.
+        
+        Args:
+            profile_name: Name of the profile
+            email: Git email
+            username: Git username
+            provider: Git provider name
+            ssh_key: Path to SSH key
+            workspace_dir: Path to workspace directory
+            gpg_key: GPG key ID for signing commits
+        """
+        self.profile_name = profile_name
+        self.email = email
+        self.username = username
+        self.provider = provider
+        self.ssh_key = ssh_key
+        self.workspace_dir = workspace_dir
+        self.gpg_key = gpg_key
+        self.global_config = Path.home() / ".gitconfig"
+        
+        # Set up configuration immediately
+        self.setup_config()
+
+    def setup_config(self) -> None:
+        """Set up Git configuration for the workspace."""
         # Create workspace directory if it doesn't exist
-        directory.mkdir(parents=True, exist_ok=True)
+        self.workspace_dir.mkdir(parents=True, exist_ok=True)
 
         # Create workspace-specific config
-        workspace_config = directory / ".gitconfig"
-        workspace_config.write_text(
-            f"""[user]
-    email = {email}
-    name = {username}
+        workspace_config = self.workspace_dir / ".gitconfig"
+        config_content = f"""[user]
+    email = {self.email}
+    name = {self.username}
+"""
 
+        if self.gpg_key:
+            config_content += f"""    signingkey = {self.gpg_key}
+
+[commit]
+    gpgsign = true
+
+[tag]
+    gpgsign = true
+
+[gpg]
+    program = gpg
+"""
+
+        config_content += f"""
 [core]
-    sshCommand = "ssh -i {ssh_key_path if ssh_key_path else '~/.ssh/id_' + self.profile_name + '_ed25519'}"
+    sshCommand = "ssh -i {self.ssh_key}"
 
 [init]
     defaultBranch = main
+
+[{self.provider}]
+    user = {self.username}
 """
-        )
+        workspace_config.write_text(config_content)
 
         # Add includeIf to global config
         if not self.global_config.exists():
@@ -49,7 +87,7 @@ class GitConfig:
 
         global_content = self.global_config.read_text()
         workspace_section = f"""
-[includeIf "gitdir:{directory}/"]
+[includeIf "gitdir:{self.workspace_dir}/"]
     path = {workspace_config}
 """
         if workspace_section not in global_content:

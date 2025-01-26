@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, TypeVar, cast
 
 import click
+from rich.prompt import Prompt
 
 from .backup import (
     backup_configs,
@@ -16,7 +17,7 @@ from .backup import (
 )
 from .exceptions import GitplexError, ProfileError, SystemConfigError
 from .profile import Profile, ProfileManager
-from .system import check_system_compatibility
+from .system import check_system_compatibility, clean_existing_configs
 from .ui import (
     confirm_action,
     print_error,
@@ -31,7 +32,9 @@ from .ui import (
     prompt_name,
     prompt_providers,
     prompt_username,
+    print_git_config_info,
 )
+from .ui_common import console
 
 # Configure logging
 logging.basicConfig(
@@ -95,7 +98,7 @@ def cli(debug: bool) -> None:
 
 
 @cli.command()
-@click.option("--name", help="Profile name")
+@click.argument("name", required=False)
 @click.option("--force", is_flag=True, help="Force overwrite existing profile")
 @click.option("--email", help="Git email address")
 @click.option("--username", help="Git username")
@@ -106,7 +109,7 @@ def cli(debug: bool) -> None:
 )
 @click.option(
     "--provider",
-    help="Git provider (e.g., github, gitlab, bitbucket)",
+    help="Git provider name (e.g., github, gitlab, custom-provider)",
 )
 @click.option(
     "--non-interactive",
@@ -118,6 +121,17 @@ def cli(debug: bool) -> None:
     is_flag=True,
     help="Skip backing up existing configurations",
 )
+@click.option(
+    "--reuse-credentials",
+    is_flag=True,
+    help="Reuse existing credentials if they match",
+    default=True,
+)
+@click.option(
+    "--clean-setup",
+    is_flag=True,
+    help="⚠️  Start fresh by removing ALL existing Git and SSH configurations",
+)
 @handle_errors
 def setup(
     name: str | None = None,
@@ -128,10 +142,91 @@ def setup(
     provider: str | None = None,
     non_interactive: bool = False,
     no_backup: bool = False,
+    reuse_credentials: bool = True,
+    clean_setup: bool = False,
 ) -> None:
-    """Set up a new Git profile with Git and SSH configurations."""
+    """Set up a new Git profile with Git and SSH configurations.
+    
+    WARNING: Using --clean-setup will remove ALL existing Git and SSH configurations!
+    This includes all SSH keys, not just GitPlex-related ones.
+    Make sure to backup any important configurations before proceeding.
+    """
     try:
-        # Print welcome message
+        # Handle clean setup if requested
+        if clean_setup:
+            if non_interactive:
+                raise GitplexError(
+                    "Clean setup cannot be used in non-interactive mode",
+                    details="This is a destructive operation that requires explicit confirmation"
+                )
+            
+            # Get paths that will be affected
+            home = Path.home()
+            git_config = home / ".gitconfig"
+            ssh_dir = home / ".ssh"
+            ssh_config = ssh_dir / "config"
+            gitplex_dir = home / ".gitplex"
+            
+            # Show warning and get confirmation
+            console.print("\n[bold red]⚠️  WARNING: Complete System Cleanup Selected[/bold red]")
+            console.print("\n[bold]The following configurations will be completely removed:[/bold]")
+            
+            console.print(f"\n[yellow]Git Configuration:[/yellow]")
+            console.print(f"• [bold]ALL[/bold] Git global settings: [cyan]{git_config}[/cyan]")
+            
+            console.print(f"\n[yellow]SSH Configuration:[/yellow]")
+            console.print(f"• [bold]ALL[/bold] SSH configurations: [cyan]{ssh_config}[/cyan]")
+            console.print(f"• [bold]ALL[/bold] SSH keys in: [cyan]{ssh_dir}[/cyan]")
+            console.print("  [dim](This includes all your existing SSH keys, not just GitPlex ones!)[/dim]")
+            
+            console.print(f"\n[yellow]GPG Configuration:[/yellow]")
+            console.print("• GitPlex GPG keys (if GPG is installed)")
+            console.print("  [dim](Only keys containing 'gitplex' in their description)[/dim]")
+            
+            console.print(f"\n[yellow]GitPlex Data:[/yellow]")
+            console.print(f"• GitPlex profiles and settings: [cyan]{gitplex_dir}[/cyan]")
+            
+            console.print("\n[bold red]⚠️  WARNING:[/bold red]")
+            console.print("• This will remove [bold]ALL[/bold] your SSH keys and Git configurations")
+            console.print("• You will need to reconfigure any existing Git/SSH setups after this")
+            console.print("• This operation [bold red]CANNOT[/bold red] be undone!")
+            
+            if not no_backup:
+                console.print("\n[green]A backup will be created before proceeding.[/green]")
+                console.print("[dim]Use --no-backup to skip backup creation (not recommended)[/dim]")
+            else:
+                console.print("\n[bold red]⚠️  No backup will be created (--no-backup flag is set)![/bold red]")
+                console.print("[bold red]All existing configurations will be permanently lost![/bold red]")
+            
+            if not click.confirm("\nAre you absolutely sure you want to proceed with the complete cleanup?", default=False):
+                console.print("[yellow]Operation cancelled.[/yellow]")
+                return
+            
+            try:
+                # Create backup first if requested
+                if not no_backup:
+                    backup_path = backup_configs()
+                    print_success(f"All configurations backed up to: {backup_path}")
+                    print_info(f"You can restore this backup later with: gitplex restore {backup_path} --type git")
+                    print_info(f"Or restore SSH config with: gitplex restore {backup_path} --type ssh")
+                
+                # Proceed with clean setup
+                clean_existing_configs()
+                print_success("Complete system cleanup finished")
+                print_info("\nYou can now create a new profile with: gitplex setup")
+                return  # Return here to prevent automatic profile creation
+                
+            except BackupError as e:
+                print_error(f"Failed to create backup: {e}")
+                if not click.confirm("Continue without backup?", default=False):
+                    console.print("[yellow]Operation cancelled.[/yellow]")
+                    return
+                clean_existing_configs()
+                print_success("Complete system cleanup finished (without backup)")
+                print_info("\nYou can now create a new profile with: gitplex setup")
+                return  # Return here as well
+
+        # Print welcome message and continue with setup
         if not non_interactive:
             print_welcome()
 
@@ -141,39 +236,6 @@ def setup(
         # Collect all profile information first
         if not name:
             name = prompt_name()
-
-        # Check if profile exists
-        try:
-            existing_profile = profile_manager.get_profile(name)
-            if not force:
-                if not confirm_action(
-                    f"Profile '{name}' already exists. Do you want to overwrite it?"
-                ):
-                    print_info("Operation cancelled")
-                    return
-                print_warning(f"Overwriting existing profile '{name}'")
-        except ProfileError:
-            # Profile doesn't exist, continue with setup
-            pass
-
-        if not no_backup:
-            # Check for existing configurations
-            existing_configs = check_existing_configs()
-            if existing_configs and not force:
-                if not confirm_action(
-                    "Existing Git/SSH configurations found. Would you like to back them up?"
-                ):
-                    print_info("Operation cancelled")
-                    return
-
-                # Backup existing configurations
-                backup_path = backup_configs()
-                if backup_path:
-                    print_success(f"Configurations backed up to: {backup_path}")
-                    print_info(
-                        "You can restore them later with: gitplex restore "
-                        "--backup-path <path>"
-                    )
 
         if not email:
             email = prompt_email()
@@ -185,26 +247,53 @@ def setup(
             directory = prompt_directory()
 
         if not provider:
-            provider = prompt_providers()[0]  # Take first provider if multiple
+            provider = prompt_providers()[0]
 
         # Create new profile
-        profile = profile_manager.create_profile(
-            name=name,
-            email=email,
-            username=username,
-            provider=provider,
-            base_dir=directory,
-            force=force,
-        )
+        try:
+            profile = profile_manager.create_profile(
+                name=name,
+                email=email,
+                username=username,
+                provider=provider,
+                base_dir=directory,
+                force=force,
+                reuse_credentials=reuse_credentials,
+            )
 
-        if not non_interactive:
-            print_setup_steps()
+            if not non_interactive:
+                print_setup_steps()
+                print_git_config_info(profile.workspace_dir)
 
-        print_success(f"Profile '{name}' created successfully")
-        print_info(
-            f"Profile '{name}' is now active. Your Git and SSH configurations "
-            "have been updated."
-        )
+            print_success(f"Profile '{name}' created successfully")
+            print_info(
+                f"Profile '{name}' is now active. Your Git and SSH configurations "
+                "have been updated."
+            )
+        except FileNotFoundError as e:
+            if "gpg" in str(e):
+                print_warning("GPG is not installed, skipping GPG key generation")
+                # Continue with profile creation without GPG
+                profile = profile_manager.create_profile(
+                    name=name,
+                    email=email,
+                    username=username,
+                    provider=provider,
+                    base_dir=directory,
+                    force=force,
+                    reuse_credentials=reuse_credentials,
+                    skip_gpg=True,  # Add this parameter to ProfileManager
+                )
+                if not non_interactive:
+                    print_setup_steps()
+                    print_git_config_info(profile.workspace_dir)
+                print_success(f"Profile '{name}' created successfully (without GPG)")
+                print_info(
+                    f"Profile '{name}' is now active. Your Git and SSH configurations "
+                    "have been updated."
+                )
+            else:
+                raise
 
     except (ProfileError, SystemConfigError) as e:
         raise GitplexError(str(e))
@@ -267,21 +356,53 @@ def delete(name: str, force: bool = False) -> None:
 @click.argument("name")
 @click.option("--email", help="New Git email")
 @click.option("--username", help="New Git username")
+@click.option("--provider", help="Add new provider", multiple=True)
+@click.option("--remove-provider", help="Remove provider", multiple=True)
 @handle_errors
-def update(name: str, email: str | None = None, username: str | None = None) -> None:
+def update(
+    name: str,
+    email: str | None = None,
+    username: str | None = None,
+    provider: tuple[str, ...] | None = None,
+    remove_provider: tuple[str, ...] | None = None,
+) -> None:
     """Update a Git profile."""
-    if not email and not username:
-        print_error("Please provide at least one of --email or --username")
+    if not any([email, username, provider, remove_provider]):
+        print_error("Please provide at least one of --email, --username, --provider, or --remove-provider")
         return
 
     profile = profile_manager.get_profile(name)
     
-    if email:
-        profile.email = email
-    if username:
-        profile.username = username
+    if email or username:
+        # Update credentials
+        new_email = email or profile.credentials.email
+        new_username = username or profile.credentials.username
+        
+        # Check if we can reuse existing credentials
+        existing_creds = profile_manager.find_matching_credentials(new_email, new_username)
+        if existing_creds:
+            profile.credentials = existing_creds
+            print_success("Updated profile with existing credentials")
+        else:
+            # Create new credentials
+            profile.credentials.email = new_email
+            profile.credentials.username = new_username
     
-    profile_manager._save_profiles()  # Save changes
+    if provider:
+        # Add new providers
+        for p in provider:
+            if p not in profile.providers:
+                profile.providers.append(p)
+                print_success(f"Added provider: {p}")
+    
+    if remove_provider:
+        # Remove providers
+        for p in remove_provider:
+            if p in profile.providers:
+                profile.providers.remove(p)
+                print_success(f"Removed provider: {p}")
+    
+    profile_manager._save_profiles()
     print_success(f"Profile '{name}' updated successfully")
 
 
