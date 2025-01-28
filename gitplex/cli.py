@@ -5,6 +5,7 @@ from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
 from typing import Any, TypeVar, cast
+import subprocess
 
 import click
 from rich.prompt import Prompt
@@ -39,6 +40,7 @@ from .ui import (
     print_git_config_info,
 )
 from .ui_common import console
+from .ssh_manager import SSHManager
 
 # Configure logging
 logging.basicConfig(
@@ -52,30 +54,42 @@ F = TypeVar('F', bound=Callable[..., Any])
 # Initialize profile manager
 profile_manager = ProfileManager()
 
-class GitplexError(click.ClickException):
-    """Base exception for Gitplex CLI errors."""
-    def show(self, file: Any = None) -> None:
-        """Show error message."""
-        print_error(self.message)
-
 def handle_errors(f: F) -> F:
     """Decorator to handle errors in CLI commands."""
     @wraps(f)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
-            logger.debug(f"Executing command {f.__name__} with args: {args}, kwargs: {kwargs}")
             return f(*args, **kwargs)
-        except (ProfileError, SystemConfigError) as e:
-            # Escape error message before raising
-            escaped_message = str(e).replace("[", "\\[").replace("]", "\\]")
-            logger.error(f"Command failed with error: {escaped_message}")
-            raise GitplexError(escaped_message) from e
+        except ProfileError as e:
+            # Handle profile-specific errors
+            if "already exists" in str(e):
+                console.print("\n[bold red]Error:[/bold red] " + str(e))
+                
+                if hasattr(e, 'current_config') and e.current_config:
+                    console.print("\n[bold cyan]Current configuration:[/bold cyan]")
+                    for key, value in e.current_config.items():
+                        console.print(f"• {key}: {value}")
+                
+                console.print("\n[bold cyan]Options:[/bold cyan]")
+                console.print("1. Use a different name for your new profile")
+                if hasattr(e, 'profile_name'):
+                    console.print(f"2. Delete the existing profile: [yellow]gitplex delete {e.profile_name}[/yellow]")
+                    console.print(f"3. Use --force to overwrite: [yellow]gitplex setup {e.profile_name} --force[/yellow]")
+            else:
+                console.print(f"\n[bold red]Error:[/bold red] {str(e)}")
+            
+            raise click.Abort()
+            
+        except (GitplexError, SystemConfigError) as e:
+            console.print(f"\n[bold red]Error:[/bold red] {str(e)}")
+            if hasattr(e, 'details') and e.details:
+                console.print(f"[dim]{e.details}[/dim]")
+            raise click.Abort()
+            
         except Exception as e:
-            # Escape error message for display
-            escaped_message = str(e).replace("[", "\\[").replace("]", "\\]")
-            logger.error(f"Unexpected error: {escaped_message}", exc_info=True)
-            print_error(f"Unexpected error:\n{escaped_message}")
-            raise click.Abort() from e
+            logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+            console.print(f"\n[bold red]Unexpected error:[/bold red] {str(e)}")
+            raise click.Abort()
     return cast(F, wrapper)
 
 
@@ -258,9 +272,19 @@ def setup(
                 
                 choice = Prompt.ask(
                     "[cyan]What would you like to do?[/cyan]",
-                    choices=["view", "reuse", "backup", "clean"],
-                    default="reuse"
+                    choices=["1", "2", "3", "4"],
+                    default="2"
                 )
+                
+                # Map numeric choices to actions
+                choice_map = {
+                    "1": "view",
+                    "2": "reuse",
+                    "3": "backup",
+                    "4": "clean"
+                }
+                
+                choice = choice_map[choice]
                 
                 if choice == "view":
                     # Show detailed key management menu
@@ -294,25 +318,75 @@ def setup(
                         
                         key_action = Prompt.ask(
                             "What would you like to do?",
-                            choices=["view", "copy", "test", "back"],
-                            default="view"
+                            choices=["1", "2", "3", "4"],
+                            default="1"
                         )
                         
-                        if key_action == "view":
-                            console.print("\n[bold]Public Key Content:[/bold]")
-                            console.print(selected_key.get_public_key())
-                        elif key_action == "copy":
-                            copy_to_clipboard(selected_key.get_public_key())
-                            print_success("Public key copied to clipboard!")
-                        elif key_action == "test":
-                            test_ssh_connection(selected_key.provider if hasattr(selected_key, 'provider') else 'github')
+                        # Map key actions
+                        key_action_map = {
+                            "1": "view",
+                            "2": "copy",
+                            "3": "test",
+                            "4": "back"
+                        }
+                        
+                        key_action = key_action_map[key_action]
+                        should_continue_key_management = True
+                        
+                        while should_continue_key_management and key_action != "back":
+                            if key_action == "view":
+                                console.print("\n[bold]Public Key Content:[/bold]")
+                                console.print(selected_key.get_public_key())
+                            elif key_action == "copy":
+                                copy_to_clipboard(selected_key.get_public_key())
+                                print_success("Public key copied to clipboard!")
+                            elif key_action == "test":
+                                test_ssh_connection(selected_key.provider if hasattr(selected_key, 'provider') else 'github')
+                            
+                            # Ask if they want to do something else with this key
+                            continue_key_management = Prompt.ask(
+                                "\nWould you like to do something else with this key?",
+                                choices=["yes", "no"],
+                                default="no"
+                            )
+                            
+                            if continue_key_management == "yes":
+                                key_action = key_action_map[Prompt.ask(
+                                    "What would you like to do?",
+                                    choices=["1", "2", "3", "4"],
+                                    default="1"
+                                )]
+                            else:
+                                should_continue_key_management = False
                     
-                    # After key management, ask what to do next
-                    choice = Prompt.ask(
-                        "\n[cyan]How would you like to proceed with setup?[/cyan]",
-                        choices=["reuse", "backup", "clean"],
-                        default="reuse"
+                    # After key management, show setup options again
+                    console.print("\n[bold cyan]📝 Setup Options[/bold cyan]")
+                    options_table = Table(box=box.ROUNDED, show_header=False, border_style="cyan")
+                    options_table.add_column("Option", style="bold yellow")
+                    options_table.add_column("Description", style="white")
+                    
+                    options_table.add_row(
+                        "2. Reuse",
+                        "Keep existing configurations and add new profile\n[dim]Best for adding a new profile without affecting existing setup[/dim]"
                     )
+                    options_table.add_row(
+                        "3. Backup",
+                        "Backup existing configs and start fresh\n[dim]Recommended if you want to start clean but keep a backup[/dim]"
+                    )
+                    options_table.add_row(
+                        "4. Clean",
+                        "Remove existing configs without backup\n[dim]⚠️ Use with caution - this will remove all existing configurations[/dim]"
+                    )
+                    
+                    console.print(options_table)
+                    console.print()
+                    
+                    next_choice = Prompt.ask(
+                        "\n[cyan]How would you like to proceed with setup?[/cyan]",
+                        choices=["2", "3", "4"],
+                        default="2"
+                    )
+                    choice = choice_map[next_choice]
                 
                 if choice == "backup":
                     if not no_backup:
@@ -329,8 +403,45 @@ def setup(
                         print_info("Operation cancelled")
                         return
                 elif choice == "reuse":
-                    # Set reuse_credentials to True explicitly
+                    # Set reuse_credentials and force to True explicitly
                     reuse_credentials = True
+                    force = True
+                    # Ensure we reuse existing SSH keys
+                    if existing_configs["ssh"]["keys"]:
+                        # Find the GitHub key if it exists
+                        github_key = next(
+                            (key for key in existing_configs["ssh"]["keys"] 
+                             if key.name.endswith("_ed25519") or key.name.endswith("_rsa")),
+                            None
+                        )
+                        if github_key:
+                            print_info(f"\n[dim]Using existing SSH key: {github_key.name}[/dim]")
+                            
+                            # Use SSH manager to handle key setup
+                            ssh_manager = SSHManager()
+                            actions = ssh_manager.troubleshoot_key(github_key.private_key)
+                            
+                            # Show actions taken
+                            if actions:
+                                console.print("\n[bold cyan]🔧 SSH Key Setup[/bold cyan]")
+                                for action in actions:
+                                    if "Fixed" in action or "Added" in action:
+                                        print_success(action)
+                                    elif "issue" in action.lower():
+                                        print_error(action)
+                                    else:
+                                        print_info(action)
+                            
+                            # Verify final setup
+                            if ssh_manager.verify_key_setup(github_key.private_key):
+                                print_success("SSH key setup verified successfully")
+                            else:
+                                print_warning("SSH key setup could not be fully verified")
+                                print_info("You may need to:")
+                                print_info("1. Check key permissions (should be 600 for private, 644 for public)")
+                                print_info(f"2. Add the key manually: ssh-add {github_key.private_key}")
+                                print_info("3. Test the connection: ssh -T git@github.com")
+                    
                     print_info("\n[dim]Using existing configurations as base...[/dim]")
         
         # Handle clean setup if requested
@@ -407,7 +518,36 @@ def setup(
                 print_info("\nYou can now create a new profile with: gitplex setup")
                 return  # Return here as well
 
-        # Collect profile information
+        # Before asking for workspace directory, show workspace explanation
+        console.print("\n[bold cyan]📂 Workspace Organization[/bold cyan]")
+        workspace_info = Table(box=box.ROUNDED, show_header=False, border_style="cyan")
+        workspace_info.add_column("Topic", style="bold yellow")
+        workspace_info.add_column("Description", style="white")
+        
+        workspace_info.add_row(
+            "What is a workspace?",
+            "A workspace is a dedicated directory where all your Git projects for a specific profile will live.\n" +
+            "[dim]For example, personal projects, work projects, open source contributions, etc.[/dim]"
+        )
+        workspace_info.add_row(
+            "Recommended Structure",
+            "~/Projects/\n" +
+            "  ├── personal/    [dim]# Your personal projects[/dim]\n" +
+            "  ├── work/        [dim]# Work-related projects[/dim]\n" +
+            "  └── opensource/  [dim]# Open source contributions[/dim]"
+        )
+        workspace_info.add_row(
+            "Benefits",
+            "• Each profile has its own isolated space\n" +
+            "• Automatic Git config switching based on directory\n" +
+            "• Better organization of projects by purpose\n" +
+            "• Easier to maintain different Git identities"
+        )
+        
+        console.print(workspace_info)
+        console.print()
+
+        # Collect profile information first
         if not name:
             name = prompt_name()
         
@@ -416,9 +556,16 @@ def setup(
         
         if not username:
             username = prompt_username()
-        
+
+        # Set up workspace directory
         if not directory:
-            directory = prompt_directory()
+            directory = Path.home() / "Projects" / name
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                print_success(f"Created workspace directory: {directory}")
+            except Exception as e:
+                print_warning(f"Could not create workspace directory: {e}")
+                directory = prompt_directory()
         
         if not provider:
             provider = prompt_providers()[0]
@@ -430,7 +577,7 @@ def setup(
                 email=email,
                 username=username,
                 provider=provider,
-                base_dir=directory,
+                base_dir=directory.parent,  # Pass the parent directory as base_dir
                 force=force,
                 reuse_credentials=reuse_credentials,
             )
