@@ -14,10 +14,17 @@ class GitplexError(Exception):
         """Escape Rich markup in text."""
         return str(text).replace("[", "\\[").replace("]", "\\]")
 
+    def __str__(self) -> str:
+        return self.message
+
 
 class ProfileError(GitplexError):
     """Profile management error."""
-    pass
+    
+    def __init__(self, message: str, profile_name: str | None = None, current_config: dict | None = None):
+        super().__init__(message)
+        self.profile_name = profile_name
+        self.current_config = current_config
 
 
 class SSHError(GitplexError):
