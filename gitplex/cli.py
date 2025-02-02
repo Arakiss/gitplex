@@ -2,10 +2,11 @@
 
 import logging
 import subprocess
+import os
 from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar, cast, Tuple, List, Optional
 
 import click
 from rich import box
@@ -54,6 +55,10 @@ F = TypeVar('F', bound=Callable[..., Any])
 
 # Initialize profile manager
 profile_manager = ProfileManager()
+
+# Type alias for diagnostic issues
+DiagnosticIssue = Tuple[str, Optional[str], Optional[Path]]
+DiagnosticResult = List[DiagnosticIssue]
 
 def handle_errors(f: F) -> F:
     """Decorator to handle errors in CLI commands."""
@@ -816,19 +821,14 @@ def copy(provider: str) -> None:
     # Show key info
     print_ssh_key_info(provider_key)
 
-@keys.command()
-@click.argument("provider")
-@click.option("--fix", is_flag=True, help="Automatically fix issues found")
-@click.option("--profile", help="Configure Git settings for a specific profile")
-@handle_errors
-def diagnose(provider: str, fix: bool, profile: str | None) -> None:
-    """Diagnose and optionally fix SSH and Git configuration issues."""
+def run_diagnostic(provider: str, profile: Optional[str] = None, fix: bool = False) -> DiagnosticResult:
+    """Run diagnostic checks and optionally fix issues."""
     # Get existing configs
     existing_configs = check_existing_configs()
     
     if not existing_configs["ssh"]["exists"]:
         print_error("No SSH keys found")
-        return
+        return []
     
     # Find key for provider
     provider_key = None
@@ -839,7 +839,7 @@ def diagnose(provider: str, fix: bool, profile: str | None) -> None:
     
     if not provider_key:
         print_error(f"No SSH key found for provider: {provider}")
-        return
+        return []
     
     console.print("\n[bold cyan]🔍 SSH Diagnostic Report[/bold cyan]")
     
@@ -1043,8 +1043,8 @@ def diagnose(provider: str, fix: bool, profile: str | None) -> None:
     
     console.print(git_table)
     
-    if issues:
-        console.print("\n[bold cyan]📋 Issues Found:[/bold cyan]")
+    if issues and fix:
+        print_info("\n🔧 Applying fixes...")
         
         # Group all issues by type for batch processing
         fixes_needed = {
@@ -1071,70 +1071,78 @@ def diagnose(provider: str, fix: bool, profile: str | None) -> None:
             elif issue_type == "set_git_config":
                 fixes_needed["git_config"][param] = profile
         
-        # Now apply all fixes if --fix is specified
-        if fix:
-            print_info("\n🔧 Applying fixes...")
+        # Fix permissions first
+        for perm, path in fixes_needed["chmod"]:
+            try:
+                path.chmod(int(perm, 8))
+                print_success(f"✓ Changed permissions of {path} to {perm}")
+            except Exception as e:
+                print_error(f"✗ Failed to change permissions of {path}: {e}")
+        
+        # Start SSH agent if needed
+        if fixes_needed["start_agent"]:
+            try:
+                subprocess.run(["eval", "`ssh-agent -s`"], shell=True, check=True)
+                print_success("✓ Started SSH agent")
+            except subprocess.CalledProcessError as e:
+                print_error(f"✗ Failed to start SSH agent: {e}")
+        
+        # Add key to agent
+        if fixes_needed["add_to_agent"]:
+            try:
+                subprocess.run(["ssh-add", fixes_needed["add_to_agent"]], check=True)
+                print_success("✓ Added key to SSH agent")
+            except subprocess.CalledProcessError as e:
+                print_error(f"✗ Failed to add key to agent: {e}")
+        
+        # Configure Git settings
+        git_config = fixes_needed["git_config"]
+        if git_config["user.name"] is not None or git_config["user.email"] is not None:
+            print_info("\nConfiguring Git settings...")
             
-            # Fix permissions first
-            for perm, path in fixes_needed["chmod"]:
+            if git_config["user.name"] is not None:
+                name = prompt_name()
                 try:
-                    path.chmod(int(perm, 8))
-                    print_success(f"✓ Changed permissions of {path} to {perm}")
+                    set_git_config("user.name", name, profile=git_config["user.name"])
+                    print_success(f"✓ Set user.name to: {name}")
                 except Exception as e:
-                    print_error(f"✗ Failed to change permissions of {path}: {e}")
+                    print_error(f"✗ Failed to set user.name: {e}")
             
-            # Start SSH agent if needed
-            if fixes_needed["start_agent"]:
+            if git_config["user.email"] is not None:
+                email = prompt_email()
                 try:
-                    subprocess.run(["eval", "`ssh-agent -s`"], shell=True, check=True)
-                    print_success("✓ Started SSH agent")
-                except subprocess.CalledProcessError as e:
-                    print_error(f"✗ Failed to start SSH agent: {e}")
-            
-            # Add key to agent
-            if fixes_needed["add_to_agent"]:
-                try:
-                    subprocess.run(["ssh-add", fixes_needed["add_to_agent"]], check=True)
-                    print_success("✓ Added key to SSH agent")
-                except subprocess.CalledProcessError as e:
-                    print_error(f"✗ Failed to add key to agent: {e}")
-            
-            # Configure Git settings
-            git_config = fixes_needed["git_config"]
-            if git_config["user.name"] is not None or git_config["user.email"] is not None:
-                print_info("\nConfiguring Git settings...")
-                
-                if git_config["user.name"] is not None:
-                    name = prompt_name()
-                    try:
-                        set_git_config("user.name", name, profile=git_config["user.name"])
-                        print_success(f"✓ Set user.name to: {name}")
-                    except Exception as e:
-                        print_error(f"✗ Failed to set user.name: {e}")
-                
-                if git_config["user.email"] is not None:
-                    email = prompt_email()
-                    try:
-                        set_git_config("user.email", email, profile=git_config["user.email"])
-                        print_success(f"✓ Set user.email to: {email}")
-                    except Exception as e:
-                        print_error(f"✗ Failed to set user.email: {e}")
-            
-            # Regenerate keys if needed (should be last as it's most disruptive)
-            if fixes_needed["regenerate_keys"]:
-                print_info("\nRegenerating SSH keys...")
-                setup(clean_setup=True)
-            elif fixes_needed["update_ssh_config"]:
-                print_info("\nUpdating SSH config...")
-                setup(force=True)
-            
-            # Run final diagnostic to verify fixes
-            print_info("\nVerifying fixes...")
-            diagnose(provider, fix=False, profile=profile)
-        else:
-            print_info("\nTo automatically fix these issues, run:")
-            print_info(f"  gitplex keys diagnose {provider} --fix" + (f" --profile {profile}" if profile else ""))
-    else:
+                    set_git_config("user.email", email, profile=git_config["user.email"])
+                    print_success(f"✓ Set user.email to: {email}")
+                except Exception as e:
+                    print_error(f"✗ Failed to set user.email: {e}")
+        
+        # Regenerate keys if needed (should be last as it's most disruptive)
+        if fixes_needed["regenerate_keys"]:
+            print_info("\nRegenerating SSH keys...")
+            setup(clean_setup=True)
+        elif fixes_needed["update_ssh_config"]:
+            print_info("\nUpdating SSH config...")
+            setup(force=True)
+        
+        # Run final diagnostic to verify fixes
+        print_info("\nVerifying fixes...")
+        return run_diagnostic(provider, profile=profile, fix=False)
+    
+    return issues
+
+@keys.command()
+@click.argument("provider")
+@click.option("--fix", is_flag=True, help="Automatically fix issues found")
+@click.option("--profile", help="Configure Git settings for a specific profile")
+@handle_errors
+def diagnose(provider: str, fix: bool, profile: str | None) -> None:
+    """Diagnose and optionally fix SSH and Git configuration issues."""
+    issues = run_diagnostic(provider, profile=profile, fix=fix)
+    
+    if not fix and issues:
+        print_info("\nTo automatically fix these issues, run:")
+        print_info(f"  gitplex keys diagnose {provider} --fix" + (f" --profile {profile}" if profile else ""))
+    elif not issues:
         print_success("\n✓ No issues found!")
         print_info("If you're still having problems:")
         print_info("1. Verify the key is added to your GitHub account")
@@ -1177,3 +1185,168 @@ def set_git_config(param: str, value: str, profile: str | None = None) -> None:
     else:
         # Set globally
         subprocess.run(["git", "config", "--global", param, value], check=True)
+
+def configure_ssh_agent_persistence() -> None:
+    """Configure SSH agent to start automatically and persist keys."""
+    # 1. Start SSH agent now if not running
+    try:
+        # First try to use existing agent
+        subprocess.run(["ssh-add", "-l"], capture_output=True, check=True)
+    except subprocess.CalledProcessError:
+        # Agent not running or no connection, try to start it
+        try:
+            # Start agent and capture its environment
+            agent_output = subprocess.check_output(
+                ["ssh-agent", "-s"],
+                text=True
+            )
+            
+            # Parse and export SSH agent environment variables
+            for line in agent_output.splitlines():
+                if "=" in line:
+                    var, value = line.split(";", 1)[0].split("=", 1)
+                    os.environ[var] = value
+                    # Also export to parent shell
+                    print(f"export {var}={value}")
+        except subprocess.CalledProcessError as e:
+            print_error(f"Failed to start SSH agent: {e}")
+            return
+    
+    # 2. Add all SSH keys to agent now
+    ssh_dir = Path.home() / ".ssh"
+    keys_added = False
+    
+    for key_file in ssh_dir.glob("id_*"):
+        if not key_file.name.endswith(".pub"):
+            try:
+                # Check if key is already added
+                key_fingerprint = subprocess.check_output(
+                    ["ssh-keygen", "-lf", str(key_file)],
+                    text=True
+                ).split()[1]
+                
+                agent_keys = subprocess.check_output(
+                    ["ssh-add", "-l"],
+                    text=True
+                )
+                
+                if key_fingerprint not in agent_keys:
+                    subprocess.run(["ssh-add", key_file], check=True)
+                    print_success(f"✓ Added key {key_file} to SSH agent")
+                    keys_added = True
+            except subprocess.CalledProcessError:
+                print_warning(f"Failed to add key {key_file} to SSH agent")
+    
+    if not keys_added:
+        print_info("All keys are already loaded in the SSH agent")
+    
+    # 3. Configure persistence in shell RC file
+    shell_rc = None
+    shell = os.environ.get("SHELL", "")
+    
+    if "zsh" in shell:
+        shell_rc = Path.home() / ".zshrc"
+    elif "bash" in shell:
+        shell_rc = Path.home() / ".bashrc"
+    
+    if shell_rc:
+        content = shell_rc.read_text() if shell_rc.exists() else ""
+        
+        # Check if SSH agent config already exists
+        if "eval `ssh-agent -s`" not in content and "ssh-add" not in content:
+            with shell_rc.open("a") as f:
+                f.write("\n# Added by GitPlex - SSH agent configuration\n")
+                f.write('# Start SSH agent if not running\n')
+                f.write('if [ -z "$SSH_AUTH_SOCK" ]; then\n')
+                f.write('    eval `ssh-agent -s` > /dev/null 2>&1\n')
+                f.write('fi\n\n')
+                # Add all keys in .ssh directory
+                f.write('# Add SSH keys if not already added\n')
+                f.write('find ~/.ssh -type f -name "id_*" ! -name "*.pub" | while read key; do\n')
+                f.write('    if ! ssh-add -l | grep -q "$(ssh-keygen -lf "$key" | awk \'{print $2}\')"; then\n')
+                f.write('        ssh-add "$key" > /dev/null 2>&1\n')
+                f.write('    fi\n')
+                f.write('done\n')
+            print_success("✓ Configured SSH agent to start automatically")
+            print_info("Please restart your terminal or run: source " + str(shell_rc))
+
+def verify_clone_url(url: str) -> tuple[bool, str]:
+    """Verify if a Git clone URL is using the correct protocol."""
+    if url.startswith("https://"):
+        ssh_url = url.replace("https://", "git@").replace("/", ":", 1)
+        return False, ssh_url
+    return True, url
+
+@cli.command()
+@click.argument("url")
+@click.option("--directory", help="Directory to clone into")
+@handle_errors
+def clone(url: str, directory: str | None = None) -> None:
+    """Clone a repository using the correct SSH configuration."""
+    # Verify URL protocol
+    is_ssh, correct_url = verify_clone_url(url)
+    if not is_ssh:
+        print_warning("HTTPS URL detected. Converting to SSH URL...")
+        print_info(f"Original URL: {url}")
+        print_info(f"SSH URL: {correct_url}")
+        url = correct_url
+    
+    # Extract provider from URL
+    provider = None
+    for p in ["github.com", "gitlab.com", "bitbucket.org"]:
+        if p in url:
+            provider = p.split(".")[0]
+            break
+    
+    if not provider:
+        raise GitplexError("Could not determine Git provider from URL")
+    
+    # Configure SSH agent first
+    configure_ssh_agent_persistence()
+    
+    # Run diagnostic and fix issues
+    issues = run_diagnostic(provider, fix=True)
+    if issues:
+        # Try to start agent and add key directly
+        try:
+            # Export SSH agent variables to current environment
+            agent_output = subprocess.check_output(
+                ["ssh-agent", "-s"],
+                text=True
+            )
+            for line in agent_output.splitlines():
+                if "=" in line:
+                    var, value = line.split(";", 1)[0].split("=", 1)
+                    os.environ[var] = value
+            
+            # Add the key
+            ssh_dir = Path.home() / ".ssh"
+            for key_file in ssh_dir.glob(f"*{provider}*"):
+                if not key_file.name.endswith(".pub"):
+                    subprocess.run(["ssh-add", key_file], check=True)
+                    print_success(f"✓ Added key {key_file} to SSH agent")
+        except subprocess.CalledProcessError as e:
+            print_error(f"Failed to configure SSH agent: {e}")
+    
+    # Try to clone
+    try:
+        # Use GIT_SSH_COMMAND to force SSH to use the correct key
+        env = os.environ.copy()
+        key_path = next(Path.home().glob(f".ssh/*{provider}*"))
+        if not key_path.name.endswith(".pub"):
+            env["GIT_SSH_COMMAND"] = f"ssh -i {key_path}"
+        
+        cmd = ["git", "clone", url]
+        if directory:
+            cmd.append(directory)
+        
+        subprocess.run(cmd, env=env, check=True)
+        print_success("✓ Repository cloned successfully")
+    except subprocess.CalledProcessError as e:
+        print_error("Failed to clone repository")
+        print_info("\nTroubleshooting steps:")
+        print_info("1. Run: ssh -vT git@" + provider + ".com")
+        print_info("2. Check if your SSH key is added to " + provider.title() + ":")
+        print_info("   " + provider + ".com/settings/keys")
+        print_info("3. Try running: eval `ssh-agent -s` && ssh-add")
+        raise click.Abort()
