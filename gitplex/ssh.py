@@ -242,8 +242,16 @@ def setup_ssh_keys(
     # Set up SSH directory
     setup_ssh_directory()
     
-    # Generate key paths
-    key_name = f"id_{profile_name}_{key_type}"
+    # Normalize provider name
+    provider = provider.lower()
+    if provider not in ["github", "gitlab", "bitbucket", "azure"]:
+        raise GitplexError(
+            f"Invalid provider: {provider}",
+            details="Supported providers: github, gitlab, bitbucket, azure"
+        )
+    
+    # Generate key paths with correct naming convention
+    key_name = f"id_{key_type}_{profile_name}_{provider}"
     private_key = SSH_DIR / key_name
     public_key = private_key.with_suffix(".pub")
     
@@ -252,7 +260,7 @@ def setup_ssh_keys(
         private_key=private_key,
         public_key=public_key,
         key_type=key_type,
-        comment=f"{email} ({profile_name})",
+        comment=f"{email} ({profile_name}@{provider})",
         provider=provider,
         profile_name=profile_name,
     )
@@ -274,10 +282,8 @@ def setup_ssh_keys(
     # Add to SSH agent
     add_to_ssh_agent(key)
     
-    # Get public key content
+    # Copy public key to clipboard
     public_key_content = key.get_public_key()
-    
-    # Copy to clipboard
     copy_to_clipboard(public_key_content)
     
     return key

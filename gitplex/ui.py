@@ -277,9 +277,34 @@ def prompt_providers() -> str:
     """Prompt for Git provider name with helpful hints."""
     console.print("\n[cyan]🌐 Git Provider[/cyan]")
     console.print(
-        "[dim]Enter your Git provider (e.g., github, gitlab, bitbucket, azure)\n"
-        "This will be used to configure your SSH keys and Git settings.[/dim]"
+        "[dim]Available providers:[/dim]"
     )
+    
+    # Show available providers
+    providers_table = Table(box=box.ROUNDED, show_header=False, border_style="blue")
+    providers_table.add_column("Provider", style="cyan")
+    providers_table.add_column("Description", style="white")
+    
+    providers_table.add_row(
+        "github",
+        "GitHub - github.com"
+    )
+    providers_table.add_row(
+        "gitlab",
+        "GitLab - gitlab.com"
+    )
+    providers_table.add_row(
+        "bitbucket",
+        "Bitbucket - bitbucket.org"
+    )
+    providers_table.add_row(
+        "azure",
+        "Azure DevOps - dev.azure.com"
+    )
+    
+    console.print(providers_table)
+    
+    valid_providers = ["github", "gitlab", "bitbucket", "azure"]
     
     while True:
         provider = Prompt.ask(
@@ -287,10 +312,13 @@ def prompt_providers() -> str:
             default="github"
         ).strip().lower()
         
-        if provider:
+        if provider in valid_providers:
             return provider
         
-        print_error("Please enter a valid provider name")
+        print_error(
+            f"Invalid provider: {provider}\n"
+            "Please choose from: github, gitlab, bitbucket, azure"
+        )
 
 def print_profile_table(profiles: list[dict[str, Any]]) -> None:
     """Print profiles in a table format."""

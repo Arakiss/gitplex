@@ -12,7 +12,7 @@ from rich.prompt import Confirm
 from .exceptions import GitplexError, ProfileError
 from .gpg import GPGKey, setup_gpg_key
 from .ssh import SSHKey, setup_ssh_keys, test_ssh_connection
-from .ui import print_error, print_info, print_success, print_warning, print_gpg_key_info
+from .ui import print_error, print_info, print_success, print_warning, print_gpg_key_info, print_ssh_key_info
 from .workspace import (
     GITPLEX_DIR,
     GitConfig,
@@ -147,7 +147,9 @@ class ProfileManager:
         ssh_dir = Path.home() / ".ssh"
         existing_key = None
         if reuse_credentials and ssh_dir.exists():
-            for key_file in ssh_dir.glob("id_*"):
+            # Look for a matching key for this profile and provider
+            key_pattern = f"id_*_{name}_{provider}"
+            for key_file in ssh_dir.glob(key_pattern):
                 if key_file.name.endswith(".pub"):
                     continue
                 if key_file.name.endswith("_ed25519") or key_file.name.endswith("_rsa"):
@@ -162,20 +164,18 @@ class ProfileManager:
         if reuse_credentials:
             existing_creds = self.find_matching_credentials(email, username)
             if existing_creds:
-                credentials = existing_creds
+                # Create new credentials but reuse email and username
+                credentials = Credentials(email=existing_creds.email, username=existing_creds.username)
+                # Don't reuse SSH key - each profile needs its own
+                credentials.ssh_key = None
             else:
                 credentials = Credentials(email=email, username=username)
-                if existing_key:
-                    credentials.ssh_key = SSHKey(
-                        private_key=existing_key,
-                        public_key=Path(f"{existing_key}.pub"),
-                    )
-                self.credentials_manager.add_credentials(credentials)
+            self.credentials_manager.add_credentials(credentials)
         else:
             credentials = Credentials(email=email, username=username)
             self.credentials_manager.add_credentials(credentials)
-        
-        # Create profile
+            
+        # Create new profile
         profile = Profile(
             name=name,
             credentials=credentials,
@@ -183,10 +183,19 @@ class ProfileManager:
             workspace_dir=workspace_dir,
         )
         
-        # Save and activate
+        # Set up SSH keys
+        if not credentials.ssh_key:
+            credentials.ssh_key = setup_ssh_keys(
+                profile_name=name,
+                provider=provider,
+                email=email,
+            )
+            # Show SSH key information
+            print_ssh_key_info(credentials.ssh_key)
+            
+        # Add profile
         self.profiles[name] = profile
         self._save_profiles()
-        self.activate_profile(name)
         
         return profile
 
