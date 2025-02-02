@@ -1,16 +1,16 @@
 """Command-line interface."""
 
 import logging
+import subprocess
 from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
 from typing import Any, TypeVar, cast
-import subprocess
 
 import click
-from rich.prompt import Prompt
-from rich.table import Table
 from rich import box
+from rich.prompt import Confirm, Prompt
+from rich.table import Table
 
 from .backup import (
     backup_configs,
@@ -19,16 +19,19 @@ from .backup import (
     restore_ssh_config,
     get_git_config,
 )
-from .exceptions import GitplexError, ProfileError, SystemConfigError
+from .exceptions import GitplexError, ProfileError, SystemConfigError, BackupError
 from .profile import Profile, ProfileManager
-from .system import check_system_compatibility, clean_existing_configs
 from .ssh import copy_to_clipboard, test_ssh_connection
+from .ssh_manager import SSHManager
+from .system import check_system_compatibility, clean_existing_configs
 from .ui import (
     confirm_action,
     print_error,
+    print_git_config_info,
     print_info,
     print_profile_table,
     print_setup_steps,
+    print_ssh_key_info,
     print_success,
     print_warning,
     print_welcome,
@@ -37,10 +40,8 @@ from .ui import (
     prompt_name,
     prompt_providers,
     prompt_username,
-    print_git_config_info,
 )
 from .ui_common import console
-from .ssh_manager import SSHManager
 
 # Configure logging
 logging.basicConfig(
@@ -741,3 +742,438 @@ def restore(backup_path: str, type: str) -> None:
         restore_ssh_config(backup)
 
     print_success(f"{type.upper()} configuration restored successfully")
+
+
+@cli.group()
+def keys() -> None:
+    """Manage SSH keys."""
+    pass
+
+@keys.command()
+@handle_errors
+def list() -> None:
+    """List all SSH keys."""
+    # Get existing configs
+    existing_configs = check_existing_configs()
+    
+    if not existing_configs["ssh"]["exists"]:
+        print_info("No SSH keys found")
+        return
+    
+    # Create table for keys
+    key_table = Table(box=box.ROUNDED, show_header=True, border_style="blue")
+    key_table.add_column("Name", style="cyan")
+    key_table.add_column("Type", style="yellow")
+    key_table.add_column("Provider", style="green")
+    key_table.add_column("Profile", style="magenta")
+    
+    for key in existing_configs["ssh"]["keys"]:
+        key_table.add_row(
+            key.name,
+            key.key_type,
+            key.provider,
+            key.profile_name,
+        )
+    
+    console.print("\n[bold cyan]🔑 SSH Keys[/bold cyan]")
+    console.print(key_table)
+    console.print()
+
+@keys.command()
+@click.argument("provider")
+@handle_errors
+def test(provider: str) -> None:
+    """Test SSH connection to a provider."""
+    test_ssh_connection(provider)
+
+@keys.command()
+@click.argument("provider")
+@handle_errors
+def copy(provider: str) -> None:
+    """Copy SSH public key for a provider to clipboard."""
+    # Get existing configs
+    existing_configs = check_existing_configs()
+    
+    if not existing_configs["ssh"]["exists"]:
+        print_error("No SSH keys found")
+        return
+    
+    # Find key for provider
+    provider_key = None
+    for key in existing_configs["ssh"]["keys"]:
+        if key.provider.lower() == provider.lower():
+            provider_key = key
+            break
+    
+    if not provider_key:
+        print_error(f"No SSH key found for provider: {provider}")
+        return
+    
+    # Copy key to clipboard
+    public_key = provider_key.get_public_key()
+    copy_to_clipboard(public_key)
+    
+    # Show key info
+    print_ssh_key_info(provider_key)
+
+@keys.command()
+@click.argument("provider")
+@click.option("--fix", is_flag=True, help="Automatically fix issues found")
+@click.option("--profile", help="Configure Git settings for a specific profile")
+@handle_errors
+def diagnose(provider: str, fix: bool, profile: str | None) -> None:
+    """Diagnose and optionally fix SSH and Git configuration issues."""
+    # Get existing configs
+    existing_configs = check_existing_configs()
+    
+    if not existing_configs["ssh"]["exists"]:
+        print_error("No SSH keys found")
+        return
+    
+    # Find key for provider
+    provider_key = None
+    for key in existing_configs["ssh"]["keys"]:
+        if key.provider.lower() == provider.lower():
+            provider_key = key
+            break
+    
+    if not provider_key:
+        print_error(f"No SSH key found for provider: {provider}")
+        return
+    
+    console.print("\n[bold cyan]🔍 SSH Diagnostic Report[/bold cyan]")
+    
+    # Track issues for fixing
+    issues = []
+    
+    # Check key files and build issues list
+    key_table = Table(box=box.ROUNDED, show_header=True, border_style="blue")
+    key_table.add_column("Check", style="cyan")
+    key_table.add_column("Status", style="green")
+    key_table.add_column("Details", style="white")
+    
+    # Check private key
+    if provider_key.private_key.exists():
+        perms = oct(provider_key.private_key.stat().st_mode)[-3:]
+        if perms == "600":
+            key_table.add_row(
+                "Private Key",
+                "[green]✓[/green]",
+                f"Found at {provider_key.private_key} with correct permissions (600)"
+            )
+        else:
+            key_table.add_row(
+                "Private Key",
+                "[yellow]![/yellow]",
+                f"Found but has wrong permissions: {perms} (should be 600)"
+            )
+            issues.append(("chmod", "600", provider_key.private_key))
+    else:
+        key_table.add_row(
+            "Private Key",
+            "[red]✗[/red]",
+            f"Not found at {provider_key.private_key}"
+        )
+        issues.append(("regenerate_keys", None, None))
+    
+    # Check public key
+    if provider_key.public_key.exists():
+        perms = oct(provider_key.public_key.stat().st_mode)[-3:]
+        if perms == "644":
+            key_table.add_row(
+                "Public Key",
+                "[green]✓[/green]",
+                f"Found at {provider_key.public_key} with correct permissions (644)"
+            )
+        else:
+            key_table.add_row(
+                "Public Key",
+                "[yellow]![/yellow]",
+                f"Found but has wrong permissions: {perms} (should be 644)"
+            )
+            issues.append(("chmod", "644", provider_key.public_key))
+    else:
+        key_table.add_row(
+            "Public Key",
+            "[red]✗[/red]",
+            f"Not found at {provider_key.public_key}"
+        )
+        issues.append(("regenerate_keys", None, None))
+    
+    # Check SSH config
+    ssh_config = Path.home() / ".ssh" / "config"
+    if ssh_config.exists():
+        config_content = ssh_config.read_text()
+        if str(provider_key.private_key) in config_content:
+            key_table.add_row(
+                "SSH Config",
+                "[green]✓[/green]",
+                "Key is properly configured in SSH config"
+            )
+        else:
+            key_table.add_row(
+                "SSH Config",
+                "[yellow]![/yellow]",
+                "Key not found in SSH config"
+            )
+            issues.append(("update_ssh_config", None, None))
+    else:
+        key_table.add_row(
+            "SSH Config",
+            "[red]✗[/red]",
+            "SSH config file not found"
+        )
+        issues.append(("create_ssh_config", None, None))
+    
+    # Check SSH agent
+    try:
+        result = subprocess.run(
+            ["ssh-add", "-l"],
+            capture_output=True,
+            text=True
+        )
+        if str(provider_key.private_key) in result.stdout:
+            key_table.add_row(
+                "SSH Agent",
+                "[green]✓[/green]",
+                "Key is loaded in SSH agent"
+            )
+        else:
+            key_table.add_row(
+                "SSH Agent",
+                "[yellow]![/yellow]",
+                "Key not loaded in SSH agent"
+            )
+            issues.append(("add_to_agent", None, provider_key.private_key))
+    except subprocess.CalledProcessError:
+        key_table.add_row(
+            "SSH Agent",
+            "[red]✗[/red]",
+            "SSH agent not running"
+        )
+        issues.append(("start_agent", None, None))
+    
+    # Test connection
+    try:
+        result = subprocess.run(
+            ["ssh", "-T", f"git@{get_provider_hostname(provider)}"],
+            capture_output=True,
+            text=True
+        )
+        if "successfully authenticated" in result.stderr.lower():
+            key_table.add_row(
+                "Connection Test",
+                "[green]✓[/green]",
+                "Successfully authenticated with provider"
+            )
+        else:
+            key_table.add_row(
+                "Connection Test",
+                "[red]✗[/red]",
+                f"Authentication failed: {result.stderr.strip()}"
+            )
+    except subprocess.CalledProcessError as e:
+        if "successfully authenticated" in e.stderr.lower():
+            key_table.add_row(
+                "Connection Test",
+                "[green]✓[/green]",
+                "Successfully authenticated with provider"
+            )
+        else:
+            key_table.add_row(
+                "Connection Test",
+                "[red]✗[/red]",
+                f"Connection failed: {e.stderr.strip()}"
+            )
+    
+    console.print(key_table)
+    
+    # Check Git configuration
+    console.print("\n[bold cyan]🔧 Git Configuration Report[/bold cyan]")
+    git_table = Table(box=box.ROUNDED, show_header=True, border_style="blue")
+    git_table.add_column("Check", style="cyan")
+    git_table.add_column("Status", style="green")
+    git_table.add_column("Details", style="white")
+    
+    # Get Git configs
+    global_git_config = get_git_config()
+    profile_git_config = get_git_config(profile) if profile else {}
+    
+    # Check user.name
+    if profile and "user.name" in profile_git_config:
+        git_table.add_row(
+            f"user.name ({profile})",
+            "[green]✓[/green]",
+            f"Set to: {profile_git_config['user.name']}"
+        )
+    elif "user.name" in global_git_config:
+        git_table.add_row(
+            "user.name (global)",
+            "[green]✓[/green]",
+            f"Set to: {global_git_config['user.name']}"
+        )
+    else:
+        git_table.add_row(
+            "user.name",
+            "[red]✗[/red]",
+            "Not configured"
+        )
+        issues.append(("set_git_config", "user.name", profile))
+    
+    # Check user.email
+    if profile and "user.email" in profile_git_config:
+        git_table.add_row(
+            f"user.email ({profile})",
+            "[green]✓[/green]",
+            f"Set to: {profile_git_config['user.email']}"
+        )
+    elif "user.email" in global_git_config:
+        git_table.add_row(
+            "user.email (global)",
+            "[green]✓[/green]",
+            f"Set to: {global_git_config['user.email']}"
+        )
+    else:
+        git_table.add_row(
+            "user.email",
+            "[red]✗[/red]",
+            "Not configured"
+        )
+        issues.append(("set_git_config", "user.email", profile))
+    
+    console.print(git_table)
+    
+    if issues:
+        console.print("\n[bold cyan]📋 Issues Found:[/bold cyan]")
+        
+        # Group all issues by type for batch processing
+        fixes_needed = {
+            "chmod": [],
+            "regenerate_keys": False,
+            "update_ssh_config": False,
+            "add_to_agent": None,
+            "start_agent": False,
+            "git_config": {"user.name": None, "user.email": None}
+        }
+        
+        # Collect all issues first
+        for issue_type, param, path in issues:
+            if issue_type == "chmod":
+                fixes_needed["chmod"].append((param, path))
+            elif issue_type == "regenerate_keys":
+                fixes_needed["regenerate_keys"] = True
+            elif issue_type == "update_ssh_config":
+                fixes_needed["update_ssh_config"] = True
+            elif issue_type == "add_to_agent":
+                fixes_needed["add_to_agent"] = path
+            elif issue_type == "start_agent":
+                fixes_needed["start_agent"] = True
+            elif issue_type == "set_git_config":
+                fixes_needed["git_config"][param] = profile
+        
+        # Now apply all fixes if --fix is specified
+        if fix:
+            print_info("\n🔧 Applying fixes...")
+            
+            # Fix permissions first
+            for perm, path in fixes_needed["chmod"]:
+                try:
+                    path.chmod(int(perm, 8))
+                    print_success(f"✓ Changed permissions of {path} to {perm}")
+                except Exception as e:
+                    print_error(f"✗ Failed to change permissions of {path}: {e}")
+            
+            # Start SSH agent if needed
+            if fixes_needed["start_agent"]:
+                try:
+                    subprocess.run(["eval", "`ssh-agent -s`"], shell=True, check=True)
+                    print_success("✓ Started SSH agent")
+                except subprocess.CalledProcessError as e:
+                    print_error(f"✗ Failed to start SSH agent: {e}")
+            
+            # Add key to agent
+            if fixes_needed["add_to_agent"]:
+                try:
+                    subprocess.run(["ssh-add", fixes_needed["add_to_agent"]], check=True)
+                    print_success("✓ Added key to SSH agent")
+                except subprocess.CalledProcessError as e:
+                    print_error(f"✗ Failed to add key to agent: {e}")
+            
+            # Configure Git settings
+            git_config = fixes_needed["git_config"]
+            if git_config["user.name"] is not None or git_config["user.email"] is not None:
+                print_info("\nConfiguring Git settings...")
+                
+                if git_config["user.name"] is not None:
+                    name = prompt_name()
+                    try:
+                        set_git_config("user.name", name, profile=git_config["user.name"])
+                        print_success(f"✓ Set user.name to: {name}")
+                    except Exception as e:
+                        print_error(f"✗ Failed to set user.name: {e}")
+                
+                if git_config["user.email"] is not None:
+                    email = prompt_email()
+                    try:
+                        set_git_config("user.email", email, profile=git_config["user.email"])
+                        print_success(f"✓ Set user.email to: {email}")
+                    except Exception as e:
+                        print_error(f"✗ Failed to set user.email: {e}")
+            
+            # Regenerate keys if needed (should be last as it's most disruptive)
+            if fixes_needed["regenerate_keys"]:
+                print_info("\nRegenerating SSH keys...")
+                setup(clean_setup=True)
+            elif fixes_needed["update_ssh_config"]:
+                print_info("\nUpdating SSH config...")
+                setup(force=True)
+            
+            # Run final diagnostic to verify fixes
+            print_info("\nVerifying fixes...")
+            diagnose(provider, fix=False, profile=profile)
+        else:
+            print_info("\nTo automatically fix these issues, run:")
+            print_info(f"  gitplex keys diagnose {provider} --fix" + (f" --profile {profile}" if profile else ""))
+    else:
+        print_success("\n✓ No issues found!")
+        print_info("If you're still having problems:")
+        print_info("1. Verify the key is added to your GitHub account")
+        print_info("2. Try running: ssh -vT git@github.com for verbose output")
+        print_info("3. Check GitHub's SSH troubleshooting guide: https://docs.github.com/en/authentication/troubleshooting-ssh")
+
+def get_provider_hostname(provider: str) -> str:
+    """Get the SSH hostname for a Git provider."""
+    provider = provider.lower()
+    hostnames = {
+        "github": "github.com",
+        "gitlab": "gitlab.com",
+        "bitbucket": "bitbucket.org",
+        "azure": "ssh.dev.azure.com",
+    }
+    if provider not in hostnames:
+        raise GitplexError(f"Unknown provider: {provider}")
+    return hostnames[provider]
+
+def prompt_git_config(param: str) -> str:
+    """Prompt user for Git configuration value."""
+    if param == "user.name":
+        return prompt_name()
+    elif param == "user.email":
+        return prompt_email()
+    else:
+        return Prompt.ask(f"Enter value for {param}")
+
+def set_git_config(param: str, value: str, profile: str | None = None) -> None:
+    """Set Git configuration value."""
+    if profile:
+        # Set for specific profile directory
+        profile_dir = Path.home() / ".gitplex" / "profiles" / profile
+        if not profile_dir.exists():
+            raise ProfileError(f"Profile directory not found: {profile}")
+        subprocess.run(
+            ["git", "config", "--file", str(profile_dir / ".gitconfig"), param, value],
+            check=True
+        )
+    else:
+        # Set globally
+        subprocess.run(["git", "config", "--global", param, value], check=True)

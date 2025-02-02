@@ -20,22 +20,40 @@ BACKUP_DIR = GITPLEX_DIR / "backups"
 GIT_CONFIG = Path.home() / ".gitconfig"
 SSH_CONFIG = Path.home() / ".ssh" / "config"
 
-def get_git_config() -> dict[str, str]:
-    """Get current Git global configuration.
-    
-    Returns:
-        Dictionary with Git configuration key-value pairs
-    """
+def get_git_config(profile: str | None = None) -> dict[str, str]:
+    """Get Git configuration."""
     try:
+        if profile:
+            # Get profile-specific config
+            profile_dir = Path.home() / ".gitplex" / "profiles" / profile
+            if not profile_dir.exists():
+                return {}
+            config_file = profile_dir / ".gitconfig"
+            if not config_file.exists():
+                return {}
+            output = subprocess.check_output(
+                ["git", "config", "--file", str(config_file), "--list"]
+            ).decode()
+        else:
+            # Get global config
+            global_config = Path.home() / ".gitconfig"
+            if not global_config.exists():
+                # Create empty .gitconfig if it doesn't exist
+                global_config.touch(mode=0o644)
+            output = subprocess.check_output(["git", "config", "--global", "--list"]).decode()
+        
+        # Parse config output into dictionary
         config = {}
-        output = subprocess.check_output(["git", "config", "--global", "--list"]).decode()
         for line in output.splitlines():
             if "=" in line:
                 key, value = line.split("=", 1)
-                config[key.strip()] = value.strip()
+                config[key.strip().lower()] = value.strip()
         return config
     except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to get Git config: {e}", exc_info=True)
+        if profile:
+            logger.warning(f"Failed to get Git config for profile {profile}: {e}")
+        else:
+            logger.warning(f"Failed to get global Git config: {e}")
         return {}
 
 def parse_ssh_key(key_file: Path) -> SSHKey | None:

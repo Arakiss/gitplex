@@ -2,12 +2,12 @@
 
 
 class GitplexError(Exception):
-    """Base exception for GitPlex errors."""
+    """Base exception for GitPlex."""
     
-    def __init__(self, message: str, details: str | None = None):
-        self.message = self._escape_markup(message)
-        self.details = self._escape_markup(details) if details else None
-        super().__init__(self.message)
+    def __init__(self, message: str, details: str | None = None) -> None:
+        self.message = message
+        self.details = details
+        super().__init__(message)
 
     @staticmethod
     def _escape_markup(text: str) -> str:
@@ -19,12 +19,17 @@ class GitplexError(Exception):
 
 
 class ProfileError(GitplexError):
-    """Profile management error."""
+    """Profile-related errors."""
     
-    def __init__(self, message: str, profile_name: str | None = None, current_config: dict | None = None):
-        super().__init__(message)
+    def __init__(
+        self,
+        message: str,
+        profile_name: str | None = None,
+        current_config: dict | None = None,
+    ) -> None:
         self.profile_name = profile_name
         self.current_config = current_config
+        super().__init__(message)
 
 
 class SSHError(GitplexError):
@@ -38,10 +43,10 @@ class GitConfigError(GitplexError):
 
 
 class BackupError(GitplexError):
-    """Errors related to backup operations."""
+    """Backup-related errors."""
     pass
 
 
 class SystemConfigError(GitplexError):
-    """System configuration error."""
+    """System configuration errors."""
     pass
