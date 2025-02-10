@@ -564,3 +564,69 @@ def clean_existing_configs() -> None:
                 console.print(f"[green]✓[/green] {item}")
         else:
             print_warning("Found configurations but failed to clean them. Check the errors above.")
+
+def clean_provider_configs(provider: str | None = None, profile_name: str | None = None) -> None:
+    """Clean provider-specific configurations.
+    
+    Args:
+        provider: Provider name to clean (e.g., 'github', 'azure')
+        profile_name: Profile name to clean
+    """
+    home = Path.home()
+    ssh_dir = home / ".ssh"
+    ssh_config = ssh_dir / "config"
+    gitplex_dir = home / ".gitplex"
+    
+    # Clean SSH keys for specific provider
+    if provider:
+        for key_file in ssh_dir.glob(f"id_*{provider}*"):
+            try:
+                key_file.unlink()
+                pub_key = key_file.with_suffix(".pub")
+                if pub_key.exists():
+                    pub_key.unlink()
+                print_success(f"Removed SSH key: {key_file}")
+            except Exception as e:
+                print_warning(f"Could not remove {key_file}: {e}")
+    
+    # Clean SSH config entries for provider
+    if ssh_config.exists():
+        config_content = ssh_config.read_text()
+        new_content = []
+        skip_block = False
+        
+        for line in config_content.splitlines():
+            if provider:
+                if line.strip().startswith(f"Host {provider}") or line.strip().startswith(f"Host *.{provider}"):
+                    skip_block = True
+                    continue
+                elif line.strip() and not line.startswith(" ") and not line.startswith("\t"):
+                    skip_block = False
+            
+            if not skip_block:
+                new_content.append(line)
+        
+        ssh_config.write_text("\n".join(new_content))
+        print_success("Updated SSH config")
+    
+    # Clean profile-specific data
+    if profile_name:
+        profile_dir = gitplex_dir / "profiles" / profile_name
+        if profile_dir.exists():
+            try:
+                import shutil
+                shutil.rmtree(profile_dir)
+                print_success(f"Removed profile directory: {profile_dir}")
+            except Exception as e:
+                print_warning(f"Could not remove profile directory: {e}")
+        
+        # Also clean any profile-specific Git config
+        git_config = home / ".gitconfig"
+        if git_config.exists():
+            try:
+                subprocess.run(["git", "config", "--global", "--remove-section", f"profile.{profile_name}"], check=False)
+                print_success("Removed profile-specific Git config")
+            except Exception as e:
+                print_warning(f"Could not remove Git config section: {e}")
+    
+    print_success("Provider-specific cleanup completed")

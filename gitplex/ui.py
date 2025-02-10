@@ -306,19 +306,42 @@ def prompt_providers() -> str:
     
     valid_providers = ["github", "gitlab", "bitbucket", "azure"]
     
-    while True:
-        provider = Prompt.ask(
+    try:
+        # Mostrar el prompt con el valor por defecto
+        raw_input = Prompt.ask(
             "[cyan]Provider name[/cyan]",
-            default="github"
-        ).strip().lower()
+            choices=valid_providers,
+            default="azure",  # Changed default to azure since it's more enterprise-focused
+            show_default=True,
+            show_choices=True
+        )
         
+        # Si el usuario presiona Enter sin escribir nada, usar azure
+        if not raw_input or raw_input.strip() == "":
+            return "azure"
+        
+        # Normalizar y validar la entrada
+        provider = raw_input.strip().lower()
+        
+        # Validar el provider
         if provider in valid_providers:
             return provider
         
+        # Si llegamos aquí, la entrada no es válida
         print_error(
             f"Invalid provider: {provider}\n"
             "Please choose from: github, gitlab, bitbucket, azure"
         )
+        # En caso de error, devolver el valor por defecto
+        return "azure"
+        
+    except (KeyboardInterrupt, EOFError):
+        # Si el usuario interrumpe o hay un EOF, usar azure por defecto
+        return "azure"
+    except Exception as e:
+        # Cualquier otro error, mostrar mensaje y usar azure por defecto
+        print_error(f"Error: {e}")
+        return "azure"
 
 def print_profile_table(profiles: list[dict[str, Any]]) -> None:
     """Print profiles in a table format."""
@@ -432,76 +455,69 @@ def print_git_config_info(workspace_dir: Path) -> None:
     console.print()
 
 def print_ssh_key_info(key: SSHKey) -> None:
-    """Print SSH key information with clear instructions for both personal and organizational use."""
-    # Header
-    console.print("\n[bold green]🔑 SSH Key Generated Successfully![/bold green]")
+    """Print SSH key information."""
+    console.print("\n🔑 SSH Key Generated Successfully!")
     
-    # Public Key Panel - Made More Prominent
-    public_key = key.get_public_key()
-    public_key_panel = Panel(
+    # Create a panel for the public key
+    key_panel = Panel(
         Text.assemble(
-            Text("Your SSH Public Key:\n", style="bold yellow"),
-            Text("─" * 50 + "\n", style="dim"),
-            Text(public_key, style="bold green"),
-            Text("\n" + "─" * 50, style="dim"),
-            Text("\n💡 This key has been copied to your clipboard", style="cyan"),
-            Text("\n💡 Save this key somewhere safe - you'll need it to set up your Git provider", style="cyan"),
+            Text("\nYour SSH Public Key:", style="bold"),
+            Text("\n──────────────────────────────────────────────────\n"),
+            # Format the key in a monospace font with proper line breaks
+            Text(
+                key.get_public_key(),
+                style="blue",
+            ),
+            Text("\n──────────────────────────────────────────────────\n"),
+            Text("\n💡 This key has been copied to your clipboard", style="green"),
+            Text("\n💡 Save this key somewhere safe - you'll need it to set up your Git provider", style="yellow"),
         ),
-        title="[bold]📋 SSH Public Key[/bold]",
-        border_style="yellow",
-        padding=(1, 2),
-    )
-    console.print(public_key_panel)
-    
-    # GitHub-specific Instructions
-    github_steps = Panel(
-        Text.assemble(
-            Text("Setting up SSH access for GitHub:\n\n", style="bold white"),
-            Text("1. Personal Account Setup:\n", style="bold cyan"),
-            Text("   • Go to ", style="white"),
-            Text("https://github.com/settings/keys\n", style="blue underline"),
-            Text("   • Click 'New SSH Key'\n", style="white"),
-            Text("   • Title: ", style="white"),
-            Text(f"GitPlex {key.profile_name} - {key.provider}\n", style="green"),
-            Text("   • Key type: Authentication Key\n", style="white"),
-            Text("   • Paste the key shown above and save\n\n", style="white"),
-            Text("2. Organization Access (if needed):\n", style="bold cyan"),
-            Text("   • Go to your organization settings\n", style="white"),
-            Text("   • Navigate to ", style="white"),
-            Text("Settings > Security > SSH Keys\n", style="blue"),
-            Text("   • Add the same SSH key\n", style="white"),
-            Text("   • Title: ", style="white"),
-            Text(f"GitPlex {key.profile_name} - Organization\n", style="green"),
-            "\n",
-            Text("💡 Tips:\n", style="bold yellow"),
-            Text("• One SSH key can be used for both personal and org access\n", style="white"),
-            Text("• Make sure you have the right organization permissions\n", style="white"),
-            Text("• Test access with: ", style="white"),
-            Text("ssh -T git@github.com", style="cyan"),
-        ),
-        title="[bold]🚀 GitHub SSH Setup Guide[/bold]",
-        border_style="green",
-        padding=(1, 2),
-    )
-    console.print(github_steps)
-    
-    # Key Details Panel
-    key_info = Panel(
-        Text.assemble(
-            Text("Type: ", style="dim"),
-            Text(key.key_type.upper(), style="blue"),
-            Text(" | ", style="dim"),
-            Text("Profile: ", style="dim"),
-            Text(key.profile_name, style="blue"),
-            Text(" | ", style="dim"),
-            Text("Location: ", style="dim"),
-            Text(str(key.private_key.parent), style="blue"),
-        ),
-        title="[bold]ℹ️ Key Details[/bold]",
+        title="📋 SSH Public Key",
         border_style="blue",
         padding=(1, 2),
     )
-    console.print(key_info)
+    
+    # Create a panel for the setup guide
+    guide_panel = Panel(
+        Text.assemble(
+            Text("\nSetting up SSH access for Azure DevOps:\n\n", style="bold"),
+            Text("1. Personal Account Setup:\n", style="bold yellow"),
+            Text("   • Go to your Azure DevOps organization\n"),
+            Text("   • Click on User Settings (top right) > SSH public keys\n"),
+            Text("   • Click 'New Key'\n"),
+            Text(f"   • Title: GitPlex {key.key_type}_{key.profile_name} - {key.provider}\n"),
+            Text("   • Key: Paste the key shown above\n"),
+            Text("\n"),
+            Text("2. Organization Access:\n", style="bold yellow"),
+            Text("   • The key will work for all projects you have access to\n"),
+            Text("   • No additional configuration needed\n"),
+            Text("\n"),
+            Text("💡 Tips:\n", style="bold green"),
+            Text("• Make sure you have the right organization permissions\n"),
+            Text("• Test access with: "),
+            Text("ssh -T git@ssh.dev.azure.com\n", style="cyan"),
+            Text("• Use SSH URLs in this format:\n"),
+            Text("  git@ssh.dev.azure.com:v3/<org>/<project>/<repo>\n", style="cyan"),
+        ),
+        title="🚀 Azure DevOps SSH Setup Guide",
+        border_style="blue",
+        padding=(1, 2),
+    )
+    
+    # Create a panel for key details
+    details_panel = Panel(
+        Text(
+            f"\nType: {key.key_type.upper()} | Profile: {key.profile_name} | Location: {key.private_key.parent}",
+            style="dim"
+        ),
+        title="ℹ️ Key Details",
+        border_style="blue",
+        padding=(1, 2),
+    )
+    
+    console.print(key_panel)
+    console.print(guide_panel)
+    console.print(details_panel)
     console.print()
 
 def print_gpg_key_info(key: "GPGKey") -> None:
