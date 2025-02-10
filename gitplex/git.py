@@ -3,6 +3,7 @@
 import logging
 from pathlib import Path
 from typing import Optional, List
+import subprocess
 
 from .exceptions import SystemConfigError
 
@@ -57,7 +58,15 @@ class GitConfig:
 """
 
         if self.gpg_key:
-            config_content += f"""    signingkey = {self.gpg_key}
+            # Only add GPG configuration if GPG is installed and a key is provided
+            try:
+                subprocess.run(
+                    ["gpg", "--version"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                config_content += f"""    signingkey = {self.gpg_key}
 
 [commit]
     gpgsign = true
@@ -68,6 +77,9 @@ class GitConfig:
 [gpg]
     program = gpg
 """
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                # GPG is not installed, skip GPG configuration
+                pass
 
         config_content += f"""
 [core]

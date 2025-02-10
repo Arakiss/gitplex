@@ -81,13 +81,20 @@ def parse_ssh_key(key_file: Path) -> SSHKey | None:
         
         # Try to determine provider from key name or comment
         provider = "unknown"
-        if "github" in key_file.name.lower() or "github" in comment.lower():
+        name_lower = key_file.name.lower()
+        comment_lower = comment.lower()
+        
+        if "github" in name_lower or "github" in comment_lower:
             provider = "github"
-        elif "gitlab" in key_file.name.lower() or "gitlab" in comment.lower():
+        elif "gitlab" in name_lower or "gitlab" in comment_lower:
             provider = "gitlab"
+        elif "bitbucket" in name_lower or "bitbucket" in comment_lower:
+            provider = "bitbucket"
+        elif "azure" in name_lower or "azure" in comment_lower:
+            provider = "azure"
             
         # Use key name as profile name if no better option
-        profile_name = key_file.stem.replace('id_', '')
+        profile_name = key_file.stem.replace('id_', '').replace(f'_{provider}', '')
         
         return SSHKey(
             private_key=key_file,
