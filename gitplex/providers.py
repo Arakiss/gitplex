@@ -10,6 +10,7 @@ class ProviderType(Enum):
     GITHUB = auto()
     GITLAB = auto()
     BITBUCKET = auto()
+    AZURE = auto()
 
     @classmethod
     def from_str(cls, value: str) -> "ProviderType":
@@ -18,6 +19,7 @@ class ProviderType(Enum):
             "github": cls.GITHUB,
             "gitlab": cls.GITLAB,
             "bitbucket": cls.BITBUCKET,
+            "azure": cls.AZURE,
         }
         normalized = value.lower().strip()
         if normalized not in mapping:
@@ -65,6 +67,12 @@ class Provider:
                 ssh_host="bitbucket.org",
                 api_url="https://api.bitbucket.org/2.0",
             )
+        elif ptype == ProviderType.AZURE:
+            return cls(
+                type=ptype,
+                ssh_host="ssh.dev.azure.com",
+                api_url="https://dev.azure.com",
+            )
         
         raise ValueError(f"Unsupported provider type: {provider_type}")
 
@@ -101,6 +109,14 @@ class ProviderManager:
         for provider in self.providers:
             config.append(f"Host {provider.ssh_host}")
             config.append("  User git")
-            config.append("  IdentityFile ~/.ssh/id_%h")
+            
+            # Special handling for Azure DevOps
+            if provider.type == ProviderType.AZURE:
+                config.append("  IdentityFile ~/.ssh/id_azure_ed25519")
+                config.append("  HostKeyAlgorithms +ssh-rsa")
+                config.append("  PubkeyAcceptedAlgorithms +ssh-rsa")
+            else:
+                config.append("  IdentityFile ~/.ssh/id_%h")
+            
             config.append("")
         return "\n".join(config) 

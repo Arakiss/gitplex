@@ -107,24 +107,7 @@ class ProfileManager:
         reuse_credentials: bool = True,
         skip_gpg: bool = False,
     ) -> Profile:
-        """Create a new Git profile.
-        
-        Args:
-            name: Profile name
-            email: Git email
-            username: Git username
-            provider: Git provider
-            base_dir: Base directory for workspaces
-            force: Force overwrite if profile exists
-            reuse_credentials: Reuse existing credentials if they match
-            skip_gpg: Skip GPG key generation
-            
-        Returns:
-            The created profile
-            
-        Raises:
-            ProfileError: If profile already exists and force is False
-        """
+        """Create a new Git profile."""
         # Validate name
         if not name:
             raise ProfileError("Profile name cannot be empty")
@@ -143,38 +126,26 @@ class ProfileManager:
                 }
             )
         
-        # Check for existing SSH keys first
-        ssh_dir = Path.home() / ".ssh"
-        existing_key = None
-        if reuse_credentials and ssh_dir.exists():
-            # Look for a matching key for this profile and provider
-            key_pattern = f"id_*_{name}_{provider}"
-            for key_file in ssh_dir.glob(key_pattern):
-                if key_file.name.endswith(".pub"):
-                    continue
-                if key_file.name.endswith("_ed25519") or key_file.name.endswith("_rsa"):
-                    existing_key = key_file
-                    break
-        
         # Create workspace directory
         workspace_dir = base_dir / name
         workspace_dir.mkdir(parents=True, exist_ok=True)
+        print_success(f"Created workspace directory: {workspace_dir}")
         
         # Create or reuse credentials
+        credentials = None
         if reuse_credentials:
             existing_creds = self.find_matching_credentials(email, username)
             if existing_creds:
-                # Create new credentials but reuse email and username
-                credentials = Credentials(email=existing_creds.email, username=existing_creds.username)
-                # Don't reuse SSH key - each profile needs its own
-                credentials.ssh_key = None
-            else:
-                credentials = Credentials(email=email, username=username)
-            self.credentials_manager.add_credentials(credentials)
-        else:
+                credentials = Credentials(
+                    email=existing_creds.email,
+                    username=existing_creds.username,
+                    gpg_key=existing_creds.gpg_key,  # Reuse GPG key if exists
+                    ssh_key=None  # Don't reuse SSH key - each profile needs its own
+                )
+        
+        if not credentials:
             credentials = Credentials(email=email, username=username)
-            self.credentials_manager.add_credentials(credentials)
-            
+        
         # Create new profile
         profile = Profile(
             name=name,
@@ -184,17 +155,32 @@ class ProfileManager:
         )
         
         # Set up SSH keys
-        if not credentials.ssh_key:
-            credentials.ssh_key = setup_ssh_keys(
-                profile_name=name,
-                provider=provider,
-                email=email,
-            )
-            # Show SSH key information
-            print_ssh_key_info(credentials.ssh_key)
-            
-        # Add profile
+        ssh_key = setup_ssh_keys(
+            profile_name=name,
+            provider=provider,
+            email=email,
+            force=force
+        )
+        credentials.ssh_key = ssh_key
+        
+        # Set up GPG key if needed
+        if not skip_gpg and not credentials.gpg_key:
+            try:
+                gpg_key = setup_gpg_key(email=email, name=username)
+                credentials.gpg_key = gpg_key
+                print_gpg_key_info(gpg_key)
+            except GitplexError as e:
+                if "GPG is not installed" in str(e):
+                    print_warning("GPG is not installed, skipping GPG key generation")
+                    print_info("You can install GPG later and run 'gitplex setup' again to enable commit signing")
+                else:
+                    raise
+        
+        # Add credentials and profile
+        self.credentials_manager.add_credentials(credentials)
         self.profiles[name] = profile
+        
+        # Save changes
         self._save_profiles()
         
         return profile

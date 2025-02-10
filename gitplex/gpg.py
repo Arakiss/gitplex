@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import platform
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List
@@ -94,6 +95,13 @@ def list_gpg_keys() -> List[GPGKey]:
 def generate_gpg_key(name: str, email: str, comment: Optional[str] = None) -> GPGKey:
     """Generate a new GPG key pair."""
     if not check_gpg_installed():
+        print_warning("GPG is not installed. Please install GPG to enable commit signing:")
+        if platform.system().lower() == "darwin":
+            print_info("  brew install gnupg")
+        else:  # Linux
+            print_info("  sudo apt install gnupg  # Debian/Ubuntu")
+            print_info("  sudo dnf install gnupg2  # Fedora")
+            print_info("  sudo pacman -S gnupg  # Arch Linux")
         raise GitplexError(
             "GPG is not installed",
             details="Please install GPG to enable commit signing"
@@ -135,9 +143,14 @@ Name-Email: {email}
                 print_success("Generated GPG key pair")
                 return key
         
-        raise GitplexError("Failed to find generated GPG key")
+        raise GitplexError(
+            "Failed to find generated GPG key",
+            details="The key was generated but could not be found in the keyring"
+        )
     except subprocess.CalledProcessError as e:
         raise GitplexError(f"Failed to generate GPG key: {e.stderr}") from e
+    except Exception as e:
+        raise GitplexError(f"Unexpected error generating GPG key: {str(e)}") from e
 
 def export_public_key(key_id: str) -> str:
     """Export public GPG key."""
