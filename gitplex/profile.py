@@ -21,6 +21,7 @@ from .workspace import (
     validate_workspace,
 )
 from .credentials import Credentials, CredentialsManager
+from .providers import ProviderManager
 
 PROFILES_FILE = GITPLEX_DIR / "profiles.json"
 
@@ -29,7 +30,7 @@ class Profile:
     """Git profile configuration."""
     name: str
     credentials: Credentials
-    provider: str
+    providers: ProviderManager
     workspace_dir: Path
     is_active: bool = False
 
@@ -38,7 +39,7 @@ class Profile:
         return {
             "name": self.name,
             "credentials": self.credentials.to_dict(),
-            "provider": self.provider,
+            "providers": [str(p.type) for p in self.providers.providers],
             "workspace_dir": str(self.workspace_dir),
             "is_active": self.is_active,
         }
@@ -46,10 +47,23 @@ class Profile:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Profile":
         """Create profile from dictionary."""
+        providers = ProviderManager()
+        
+        # Handle both old and new format
+        if "providers" in data:
+            # New format with multiple providers
+            for provider in data["providers"]:
+                providers.add_provider(provider)
+        elif "provider" in data:
+            # Old format with single provider
+            providers.add_provider(data["provider"])
+        else:
+            raise ValueError("No provider information found in profile data")
+            
         return cls(
             name=data["name"],
             credentials=Credentials.from_dict(data["credentials"]),
-            provider=data["provider"],
+            providers=providers,
             workspace_dir=Path(data["workspace_dir"]),
             is_active=data.get("is_active", False),
         )
@@ -113,18 +127,36 @@ class ProfileManager:
             raise ProfileError("Profile name cannot be empty")
         
         # Check if profile exists
-        if name in self.profiles and not force:
-            existing_profile = self.profiles[name]
-            raise ProfileError(
-                f"Profile '{name}' already exists",
-                profile_name=name,
-                current_config={
-                    "Email": existing_profile.credentials.email,
-                    "Username": existing_profile.credentials.username,
-                    "Workspace": str(existing_profile.workspace_dir),
-                    "Provider": existing_profile.provider
-                }
-            )
+        if name in self.profiles:
+            if force:
+                # If force is True, we'll update the existing profile
+                profile = self.profiles[name]
+                profile.providers.add_provider(provider)
+                
+                # Set up SSH keys for the new provider
+                ssh_key = setup_ssh_keys(
+                    profile_name=name,
+                    provider=provider,
+                    email=email,
+                    force=force
+                )
+                if not profile.credentials.ssh_key:
+                    profile.credentials.ssh_key = ssh_key
+                
+                self._save_profiles()
+                return profile
+            else:
+                existing_profile = self.profiles[name]
+                raise ProfileError(
+                    f"Profile '{name}' already exists",
+                    profile_name=name,
+                    current_config={
+                        "Email": existing_profile.credentials.email,
+                        "Username": existing_profile.credentials.username,
+                        "Workspace": str(existing_profile.workspace_dir),
+                        "Providers": [str(p.type) for p in existing_profile.providers.providers]
+                    }
+                )
         
         # Create workspace directory
         workspace_dir = base_dir / name
@@ -146,11 +178,15 @@ class ProfileManager:
         if not credentials:
             credentials = Credentials(email=email, username=username)
         
+        # Create provider manager and add the provider
+        providers = ProviderManager()
+        providers.add_provider(provider)
+        
         # Create new profile
         profile = Profile(
             name=name,
             credentials=credentials,
-            provider=provider,
+            providers=providers,
             workspace_dir=workspace_dir,
         )
         
